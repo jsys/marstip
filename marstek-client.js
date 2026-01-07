@@ -1,11 +1,65 @@
 const dgram = require('dgram');
 
-const DEVICE_IP = '192.168.1.69';
-const DEVICE_PORT = 30000;
+const DEFAULT_PORT = 30000;
 const TIMEOUT_MS = 5000;
+
+let deviceIp = null;
+let devicePort = DEFAULT_PORT;
+
+function setDevice(ip, port = DEFAULT_PORT) {
+  deviceIp = ip;
+  devicePort = port;
+}
+
+function getDevice() {
+  return { ip: deviceIp, port: devicePort };
+}
+
+function discoverDevices(timeout = 3000) {
+  return new Promise((resolve) => {
+    const devices = [];
+    const client = dgram.createSocket('udp4');
+
+    client.on('message', (msg, rinfo) => {
+      try {
+        const response = JSON.parse(msg.toString());
+        if (response.result?.device) {
+          // Éviter les doublons
+          if (!devices.find(d => d.ip === rinfo.address)) {
+            devices.push({
+              ip: rinfo.address,
+              port: DEFAULT_PORT,
+              ...response.result
+            });
+          }
+        }
+      } catch {}
+    });
+
+    client.bind(() => {
+      client.setBroadcast(true);
+      const message = JSON.stringify({
+        id: 0,
+        method: 'Marstek.GetDevice',
+        params: { ble_mac: '0' }
+      });
+      client.send(message, DEFAULT_PORT, '255.255.255.255');
+    });
+
+    setTimeout(() => {
+      client.close();
+      resolve(devices);
+    }, timeout);
+  });
+}
 
 function sendCommand(command) {
   return new Promise((resolve, reject) => {
+    if (!deviceIp) {
+      reject(new Error('Device not configured. Call setDevice(ip, port) first.'));
+      return;
+    }
+
     const client = dgram.createSocket('udp4');
     const message = Buffer.from(JSON.stringify(command));
 
@@ -25,7 +79,7 @@ function sendCommand(command) {
       }
     });
 
-    client.send(message, DEVICE_PORT, DEVICE_IP, (err) => {
+    client.send(message, devicePort, deviceIp, (err) => {
       if (err) {
         clearTimeout(timeout);
         client.close();
@@ -36,14 +90,13 @@ function sendCommand(command) {
 }
 
 async function getDashboard() {
-  const [device, energy, battery, wifi, mode, meter] = await Promise.all([
-    sendCommand({ id: 1, method: 'Marstek.GetDevice', params: { ble_mac: '0' } }).catch(() => ({})),
-    sendCommand({ id: 2, method: 'ES.GetStatus', params: { id: 0 } }).catch(() => ({})),
-    sendCommand({ id: 3, method: 'Bat.GetStatus', params: { id: 0 } }).catch(() => ({})),
-    sendCommand({ id: 4, method: 'Wifi.GetStatus', params: { id: 0 } }).catch(() => ({})),
-    sendCommand({ id: 5, method: 'ES.GetMode', params: { id: 0 } }).catch(() => ({})),
-    sendCommand({ id: 6, method: 'EM.GetStatus', params: { id: 0 } }).catch(() => ({})),
-  ]);
+  // Appels séquentiels - le device ne gère qu'une requête UDP à la fois
+  const device = await sendCommand({ id: 1, method: 'Marstek.GetDevice', params: { ble_mac: '0' } }).catch(() => ({}));
+  const energy = await sendCommand({ id: 2, method: 'ES.GetStatus', params: { id: 0 } }).catch(() => ({}));
+  const battery = await sendCommand({ id: 3, method: 'Bat.GetStatus', params: { id: 0 } }).catch(() => ({}));
+  const wifi = await sendCommand({ id: 4, method: 'Wifi.GetStatus', params: { id: 0 } }).catch(() => ({}));
+  const mode = await sendCommand({ id: 5, method: 'ES.GetMode', params: { id: 0 } }).catch(() => ({}));
+  const meter = await sendCommand({ id: 6, method: 'EM.GetStatus', params: { id: 0 } }).catch(() => ({}));
 
   return {
     device,
@@ -56,4 +109,4 @@ async function getDashboard() {
   };
 }
 
-module.exports = { sendCommand, getDashboard };
+module.exports = { sendCommand, getDashboard, discoverDevices, setDevice, getDevice };
