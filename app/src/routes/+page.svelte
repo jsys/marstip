@@ -52,6 +52,18 @@
     timestamp: string;
   }
 
+  interface TimeSlot {
+    id: string;
+    startHour: number;  // 0-24 en décimal (ex: 22.083 pour 22h05)
+    endHour: number;
+    mode: 'Auto' | 'AI' | 'Manual' | 'Passive';
+    config?: {
+      power?: number;
+      isCharge?: boolean;
+      cd_time?: number;
+    };
+  }
+
   let data: DashboardData | null = $state(null);
   let error: string | null = $state(null);
   let loading = $state(true);
@@ -61,7 +73,7 @@
   let soc = $derived((data as DashboardData | null)?.battery?.soc ?? (data as DashboardData | null)?.energy?.bat_soc ?? 0);
   let isCharging = $derived(((data as DashboardData | null)?.energy?.ongrid_power ?? 0) < 0);
   let isDischarging = $derived(((data as DashboardData | null)?.energy?.ongrid_power ?? 0) > 0);
-  let socColor = $derived(soc < 20 ? 'bg-red-500' : soc < 50 ? 'bg-yellow-500' : 'bg-green-500');
+  let socColor = $derived(isCharging ? 'bg-blue-500' : isDischarging ? 'bg-red-500' : (soc < 20 ? 'bg-red-500' : soc < 50 ? 'bg-yellow-500' : 'bg-green-500'));
 
   // Auto-discovery states
   let discovering = $state(true);
@@ -78,84 +90,249 @@
   let currentInterval = $state(3000);
 
   // Mode change states
-  let showModeModal = $state(false);
-  let pendingMode = $state<string | null>(null);
   let changingMode = $state(false);
-  let modeError = $state<string | null>(null);
 
-  // Manual mode config
-  let manualConfig = $state({
-    time_num: 0,
-    start_time: '22:00',
-    end_time: '06:00',
-    week_set: 127, // Tous les jours
-    power: 800,
-    isCharge: true, // true = charge (power négatif envoyé), false = décharge
-    enable: 1
-  });
+  // Planning / Scheduler states
+  let timeSlots = $state<TimeSlot[]>([
+    { id: crypto.randomUUID(), startHour: 0, endHour: 24, mode: 'Auto' }
+  ]);
+  let schedulerEnabled = $state(false);
+  let editingSlot = $state<TimeSlot | null>(null);
+  let showSlotModal = $state(false);
+  let currentScheduledSlotId = $state<string | null>(null);
+  let schedulerInterval: ReturnType<typeof setInterval>;
 
-  // Passive mode config
-  let passiveConfig = $state({
-    power: 800,
-    isCharge: false, // true = charge, false = décharge
-    cd_time: 300
-  });
-
-  // Saved configs in localStorage
-  let hasSavedManualConfig = $state(false);
-  let hasSavedPassiveConfig = $state(false);
+  // Drag & drop states
+  let draggingBoundary = $state<number | null>(null); // Index de la frontière (entre slot i et i+1)
+  let dragTooltip = $state<{ hour: number; x: number; y: number } | null>(null);
+  let rubanElement = $state<HTMLDivElement | null>(null);
 
   // Storage keys
-  const STORAGE_KEY_MANUAL = 'marstip_manual_config';
-  const STORAGE_KEY_PASSIVE = 'marstip_passive_config';
+  const STORAGE_KEY_SLOTS = 'marstip_time_slots';
+  const STORAGE_KEY_SCHEDULER = 'marstip_scheduler_enabled';
 
   function loadSavedConfigs() {
     try {
-      const savedManual = localStorage.getItem(STORAGE_KEY_MANUAL);
-      if (savedManual) {
-        const parsed = JSON.parse(savedManual);
-        Object.assign(manualConfig, parsed);
-        hasSavedManualConfig = true;
+      const savedSlots = localStorage.getItem(STORAGE_KEY_SLOTS);
+      if (savedSlots) {
+        timeSlots = JSON.parse(savedSlots);
       }
-      const savedPassive = localStorage.getItem(STORAGE_KEY_PASSIVE);
-      if (savedPassive) {
-        const parsed = JSON.parse(savedPassive);
-        Object.assign(passiveConfig, parsed);
-        hasSavedPassiveConfig = true;
+      const savedScheduler = localStorage.getItem(STORAGE_KEY_SCHEDULER);
+      if (savedScheduler) {
+        schedulerEnabled = JSON.parse(savedScheduler);
       }
     } catch (e) {
       console.error('Error loading saved configs:', e);
     }
   }
 
-  function saveManualConfig() {
+  function saveTimeSlots() {
     try {
-      localStorage.setItem(STORAGE_KEY_MANUAL, JSON.stringify(manualConfig));
-      hasSavedManualConfig = true;
+      localStorage.setItem(STORAGE_KEY_SLOTS, JSON.stringify(timeSlots));
+      localStorage.setItem(STORAGE_KEY_SCHEDULER, JSON.stringify(schedulerEnabled));
     } catch (e) {
-      console.error('Error saving manual config:', e);
+      console.error('Error saving time slots:', e);
     }
   }
 
-  function savePassiveConfig() {
-    try {
-      localStorage.setItem(STORAGE_KEY_PASSIVE, JSON.stringify(passiveConfig));
-      hasSavedPassiveConfig = true;
-    } catch (e) {
-      console.error('Error saving passive config:', e);
+  // --- Planning / Scheduler functions ---
+
+  function getModeColor(mode: string): string {
+    switch (mode) {
+      case 'Auto': return 'bg-cyan-500';
+      case 'AI': return 'bg-purple-500';
+      case 'Manual': return 'bg-yellow-500';
+      case 'Passive': return 'bg-green-500';
+      default: return 'bg-slate-500';
     }
   }
 
-  // Jours de la semaine pour week_set
-  const weekDays = [
-    { bit: 1, label: 'Lun' },
-    { bit: 2, label: 'Mar' },
-    { bit: 4, label: 'Mer' },
-    { bit: 8, label: 'Jeu' },
-    { bit: 16, label: 'Ven' },
-    { bit: 32, label: 'Sam' },
-    { bit: 64, label: 'Dim' }
-  ];
+  function formatHour(decimalHour: number): string {
+    const hours = Math.floor(decimalHour);
+    const minutes = Math.round((decimalHour - hours) * 60);
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+  }
+
+  function openSlotEditor(slot: TimeSlot) {
+    editingSlot = { ...slot, config: slot.config ? { ...slot.config } : undefined };
+    showSlotModal = true;
+  }
+
+  function saveSlot() {
+    if (!editingSlot) return;
+    const idx = timeSlots.findIndex(s => s.id === editingSlot!.id);
+    if (idx >= 0) {
+      timeSlots[idx] = editingSlot;
+      timeSlots = [...timeSlots]; // Trigger reactivity
+    }
+    showSlotModal = false;
+    editingSlot = null;
+    saveTimeSlots();
+  }
+
+  function deleteSlot(slotId: string) {
+    if (timeSlots.length <= 1) return; // Garder au moins une plage
+
+    const idx = timeSlots.findIndex(s => s.id === slotId);
+    if (idx < 0) return;
+
+    const deleted = timeSlots[idx];
+
+    // Fusionner avec la plage adjacente (précédente si possible, sinon suivante)
+    if (idx > 0) {
+      // Fusionner avec la plage précédente
+      timeSlots[idx - 1] = { ...timeSlots[idx - 1], endHour: deleted.endHour };
+    } else if (idx < timeSlots.length - 1) {
+      // Fusionner avec la plage suivante
+      timeSlots[idx + 1] = { ...timeSlots[idx + 1], startHour: deleted.startHour };
+    }
+
+    timeSlots = timeSlots.filter(s => s.id !== slotId);
+
+    // Si il ne reste qu'une seule zone, s'assurer qu'elle couvre 0h-24h
+    if (timeSlots.length === 1) {
+      timeSlots[0] = { ...timeSlots[0], startHour: 0, endHour: 24 };
+    }
+
+    showSlotModal = false;
+    editingSlot = null;
+    saveTimeSlots();
+  }
+
+  function addSlotAfter(afterSlot: TimeSlot) {
+    const idx = timeSlots.findIndex(s => s.id === afterSlot.id);
+    if (idx < 0) return;
+
+    // Diviser la plage en deux au milieu, arrondi à 5min
+    const midHour = snapToFiveMinutes((afterSlot.startHour + afterSlot.endHour) / 2);
+
+    // Mettre à jour la plage existante
+    timeSlots[idx] = { ...afterSlot, endHour: midHour };
+
+    // Créer la nouvelle plage avec le MÊME mode
+    const newSlot: TimeSlot = {
+      id: crypto.randomUUID(),
+      startHour: midHour,
+      endHour: afterSlot.endHour,
+      mode: afterSlot.mode,
+      config: afterSlot.config ? { ...afterSlot.config } : undefined
+    };
+
+    // Insérer après
+    timeSlots = [...timeSlots.slice(0, idx + 1), newSlot, ...timeSlots.slice(idx + 1)];
+    saveTimeSlots();
+
+    // Fermer la popup
+    showSlotModal = false;
+    editingSlot = null;
+  }
+
+  function toggleScheduler() {
+    schedulerEnabled = !schedulerEnabled;
+    saveTimeSlots();
+    if (schedulerEnabled) {
+      checkScheduler();
+    }
+  }
+
+  function getCurrentSlot(): TimeSlot | null {
+    const now = new Date();
+    const currentHour = now.getHours() + now.getMinutes() / 60;
+    return timeSlots.find(s => currentHour >= s.startHour && currentHour < s.endHour) ?? null;
+  }
+
+  function checkScheduler() {
+    if (!schedulerEnabled || !deviceConfigured) return;
+
+    const slot = getCurrentSlot();
+    if (!slot) return;
+
+    // Si on a déjà appliqué cette plage, ne rien faire
+    if (currentScheduledSlotId === slot.id) return;
+
+    // Vérifier si le mode actuel correspond
+    if (data?.mode?.mode !== slot.mode) {
+      currentScheduledSlotId = slot.id;
+      // Appliquer le mode avec sa config si présente
+      if (slot.mode === 'Manual' && slot.config) {
+        const power = slot.config.isCharge ? -Math.abs(slot.config.power ?? 800) : Math.abs(slot.config.power ?? 800);
+        applyMode('Manual', { manual_cfg: { time_num: 0, start_time: formatHour(slot.startHour), end_time: formatHour(slot.endHour), week_set: 127, power, enable: 1 } });
+      } else if (slot.mode === 'Passive' && slot.config) {
+        const power = slot.config.isCharge ? -Math.abs(slot.config.power ?? 800) : Math.abs(slot.config.power ?? 800);
+        applyMode('Passive', { passive_cfg: { power, cd_time: slot.config.cd_time ?? 300 } });
+      } else {
+        applyMode(slot.mode);
+      }
+    } else {
+      // Mode déjà correct, juste marquer comme appliqué
+      currentScheduledSlotId = slot.id;
+    }
+  }
+
+  // --- Drag & Drop des frontières ---
+
+  const MIN_SLOT_DURATION = 0.25; // 15 minutes minimum
+
+  function snapToFiveMinutes(hour: number): number {
+    // Arrondir au 5 minutes le plus proche (5min = 1/12 d'heure)
+    return Math.round(hour * 12) / 12;
+  }
+
+  function xToHour(x: number, rect: DOMRect): number {
+    const ratio = Math.max(0, Math.min(1, x / rect.width));
+    return ratio * 24;
+  }
+
+  function startDrag(boundaryIndex: number, e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    draggingBoundary = boundaryIndex;
+
+    const rect = rubanElement?.getBoundingClientRect();
+    if (rect) {
+      const hour = snapToFiveMinutes(xToHour(e.clientX - rect.left, rect));
+      dragTooltip = { hour, x: e.clientX, y: rect.top - 30 };
+    }
+
+    document.addEventListener('mousemove', onDrag);
+    document.addEventListener('mouseup', endDrag);
+  }
+
+  function onDrag(e: MouseEvent) {
+    if (draggingBoundary === null || !rubanElement) return;
+
+    const rect = rubanElement.getBoundingClientRect();
+    let newHour = snapToFiveMinutes(xToHour(e.clientX - rect.left, rect));
+
+    // Contraintes : ne pas dépasser les plages adjacentes
+    const leftSlot = timeSlots[draggingBoundary];
+    const rightSlot = timeSlots[draggingBoundary + 1];
+
+    const minHour = leftSlot.startHour + MIN_SLOT_DURATION;
+    const maxHour = rightSlot.endHour - MIN_SLOT_DURATION;
+
+    newHour = Math.max(minHour, Math.min(maxHour, newHour));
+
+    // Mettre à jour le tooltip
+    dragTooltip = { hour: newHour, x: e.clientX, y: rect.top - 30 };
+
+    // Mettre à jour les plages en temps réel
+    timeSlots[draggingBoundary] = { ...leftSlot, endHour: newHour };
+    timeSlots[draggingBoundary + 1] = { ...rightSlot, startHour: newHour };
+    timeSlots = [...timeSlots]; // Trigger reactivity
+  }
+
+  function endDrag() {
+    document.removeEventListener('mousemove', onDrag);
+    document.removeEventListener('mouseup', endDrag);
+
+    if (draggingBoundary !== null) {
+      saveTimeSlots();
+    }
+
+    draggingBoundary = null;
+    dragTooltip = null;
+  }
 
   // Calcule l'intervalle optimal selon le temps de réponse
   function getOptimalInterval(responseTime: number, hasError: boolean): number {
@@ -303,10 +480,16 @@
       deviceConfigured = true;
       startDashboard();
     }
+
+    // Démarrer le scheduler (vérifie toutes les minutes)
+    schedulerInterval = setInterval(checkScheduler, 60000);
+    // Check immédiat au démarrage
+    setTimeout(checkScheduler, 1000);
   });
 
   onDestroy(() => {
     if (interval) clearInterval(interval);
+    if (schedulerInterval) clearInterval(schedulerInterval);
   });
 
   function formatPower(watts: number | undefined): string {
@@ -321,44 +504,8 @@
     return `${(wh / 1000).toFixed(1)} kWh`;
   }
 
-  async function handleModeChange(e: Event) {
-    const newMode = (e.target as HTMLSelectElement).value;
-    modeError = null;
-
-    if (newMode === 'Manual') {
-      if (hasSavedManualConfig) {
-        // Config sauvegardée: appliquer directement
-        await applyManualMode();
-      } else {
-        // Pas de config: ouvrir le popup
-        pendingMode = newMode;
-        showModeModal = true;
-      }
-    } else if (newMode === 'Passive') {
-      if (hasSavedPassiveConfig) {
-        // Config sauvegardée: appliquer directement
-        await applyPassiveMode();
-      } else {
-        // Pas de config: ouvrir le popup
-        pendingMode = newMode;
-        showModeModal = true;
-      }
-    } else {
-      await applyMode(newMode);
-    }
-  }
-
-  function openModeConfig() {
-    const currentMode = data?.mode?.mode;
-    if (currentMode === 'Manual' || currentMode === 'Passive') {
-      pendingMode = currentMode;
-      showModeModal = true;
-    }
-  }
-
   async function applyMode(mode: string, config?: object) {
     changingMode = true;
-    modeError = null;
 
     try {
       if (isTauri()) {
@@ -374,55 +521,11 @@
           throw new Error(err.error || 'Erreur lors du changement de mode');
         }
       }
-      showModeModal = false;
-      pendingMode = null;
       await fetchData();
     } catch (e) {
-      modeError = String(e);
+      console.error('Error applying mode:', e);
     } finally {
       changingMode = false;
-    }
-  }
-
-  function applyManualMode() {
-    // Sauvegarder la config
-    saveManualConfig();
-    // Calculer la puissance avec le signe (négatif = charge)
-    const power = manualConfig.isCharge ? -Math.abs(manualConfig.power) : Math.abs(manualConfig.power);
-    const cfg = {
-      time_num: manualConfig.time_num,
-      start_time: manualConfig.start_time,
-      end_time: manualConfig.end_time,
-      week_set: manualConfig.week_set,
-      power,
-      enable: manualConfig.enable
-    };
-    applyMode('Manual', { manual_cfg: cfg });
-  }
-
-  function applyPassiveMode() {
-    // Sauvegarder la config
-    savePassiveConfig();
-    // Calculer la puissance avec le signe (négatif = charge)
-    const power = passiveConfig.isCharge ? -Math.abs(passiveConfig.power) : Math.abs(passiveConfig.power);
-    const cfg = {
-      power,
-      cd_time: passiveConfig.cd_time
-    };
-    applyMode('Passive', { passive_cfg: cfg });
-  }
-
-  function cancelModeChange() {
-    showModeModal = false;
-    pendingMode = null;
-    modeError = null;
-  }
-
-  function toggleWeekDay(bit: number) {
-    if (manualConfig.week_set & bit) {
-      manualConfig.week_set &= ~bit;
-    } else {
-      manualConfig.week_set |= bit;
     }
   }
 </script>
@@ -587,17 +690,29 @@
     <div class="bg-red-900/50 border border-red-500 rounded-xl p-6 text-red-200 max-w-2xl mx-auto">
       <h3 class="font-bold text-lg mb-2">Erreur de connexion</h3>
       <p class="mb-4">{error}</p>
-      <button
-        onclick={() => {
-          error = null;
-          deviceConfigured = false;
-          discoveryError = 'no_device';
-          if (interval) clearInterval(interval);
-        }}
-        class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors"
-      >
-        Modifier l'adresse IP
-      </button>
+      <div class="flex gap-3">
+        <button
+          onclick={() => {
+            error = null;
+            loading = true;
+            fetchData();
+          }}
+          class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-medium rounded-lg transition-colors"
+        >
+          Réessayer
+        </button>
+        <button
+          onclick={() => {
+            error = null;
+            deviceConfigured = false;
+            discoveryError = 'no_device';
+            if (interval) clearInterval(interval);
+          }}
+          class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors"
+        >
+          Modifier l'adresse IP
+        </button>
+      </div>
     </div>
 
   {:else if data}
@@ -605,9 +720,12 @@
 
       <!-- Batterie -->
       <div class="col-span-1 md:col-span-2 lg:col-span-2 bg-slate-800 rounded-xl p-6 border border-slate-700">
-        <h2 class="text-lg font-semibold text-slate-300 mb-4 flex items-center gap-2">
-          <span class="text-2xl">🔋</span> Batterie
-        </h2>
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold text-slate-300 flex items-center gap-2">
+            <span class="text-2xl">🔋</span> Batterie
+          </h2>
+          <span class="text-slate-400 text-sm">{data.battery.bat_temp}°C</span>
+        </div>
 
         <div class="flex items-center gap-6">
           <div class="text-5xl font-bold text-white">{soc}%</div>
@@ -625,22 +743,106 @@
             </div>
           </div>
         </div>
+      </div>
 
-        <div class="mt-4 flex gap-6 text-sm">
-          <div class="flex items-center gap-2">
-            <span class="text-slate-400">Temp:</span>
-            <span class="text-white font-medium">{data.battery.bat_temp}°C</span>
+      <!-- Planning -->
+      <div class="col-span-1 md:col-span-2 lg:col-span-3 bg-slate-800 rounded-xl p-6 border border-slate-700">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold text-slate-300 flex items-center gap-2">
+            <span class="text-2xl">📅</span> Planning
+          </h2>
+          <div class="flex items-center gap-3">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={schedulerEnabled}
+                onchange={toggleScheduler}
+                class="w-4 h-4 accent-cyan-500"
+              />
+              <span class="text-sm text-slate-400">Activer</span>
+            </label>
           </div>
-          <div class="flex items-center gap-2">
-            <span class={data.battery.charg_flag ? 'text-green-400' : 'text-slate-500'}>
-              {data.battery.charg_flag ? '✓' : '✗'} Charge
-            </span>
+        </div>
+
+        <!-- Ruban 24h -->
+        <div class="relative">
+          <!-- Graduations -->
+          <div class="flex justify-between text-xs text-slate-500 mb-1 px-0.5">
+            {#each [0, 3, 6, 9, 12, 15, 18, 21, 24] as h}
+              <span class="w-0 text-center" style="margin-left: {h === 0 ? '0' : '-0.5em'}">{h}h</span>
+            {/each}
           </div>
-          <div class="flex items-center gap-2">
-            <span class={data.battery.dischrg_flag ? 'text-green-400' : 'text-slate-500'}>
-              {data.battery.dischrg_flag ? '✓' : '✗'} Décharge
-            </span>
+
+          <!-- Barre des plages -->
+          <div
+            bind:this={rubanElement}
+            class="relative h-12 bg-slate-700 rounded-lg overflow-hidden flex"
+          >
+            {#each timeSlots as slot, i}
+              <button
+                onclick={() => openSlotEditor(slot)}
+                class="h-full transition-colors hover:brightness-110 flex flex-col items-center justify-center {getModeColor(slot.mode)}"
+                style="width: {(slot.endHour - slot.startHour) / 24 * 100}%"
+                title="{formatHour(slot.startHour)} - {formatHour(slot.endHour)}: {slot.mode}"
+              >
+                {#if (slot.mode === 'Manual' || slot.mode === 'Passive') && slot.config?.isCharge !== undefined}
+                  <span class="text-xs font-medium text-white/90 truncate px-1">{slot.config.isCharge ? 'Charge' : 'Décharge'}</span>
+                  <span class="text-[10px] text-white/70 truncate px-1">{slot.config.power ?? 800}W</span>
+                {:else}
+                  <span class="text-xs font-medium text-white/90 truncate px-1">{slot.mode}</span>
+                {/if}
+              </button>
+              <!-- Poignée de frontière (sauf après le dernier) -->
+              {#if i < timeSlots.length - 1}
+                <div
+                  class="absolute top-0 bottom-0 w-3 -ml-1.5 cursor-col-resize z-10 group"
+                  style="left: {slot.endHour / 24 * 100}%"
+                  onmousedown={(e) => startDrag(i, e)}
+                  role="slider"
+                  aria-label="Ajuster la frontière à {formatHour(slot.endHour)}"
+                  aria-valuemin={0}
+                  aria-valuemax={24}
+                  aria-valuenow={slot.endHour}
+                  tabindex="0"
+                >
+                  <div class="absolute left-1/2 top-0 bottom-0 w-0.5 bg-slate-900/50 group-hover:bg-white group-hover:shadow-[0_0_6px_rgba(255,255,255,0.5)] transition-all"></div>
+                </div>
+              {/if}
+            {/each}
           </div>
+
+          <!-- Tooltip pendant le drag -->
+          {#if dragTooltip}
+            <div
+              class="fixed bg-slate-900 text-white text-sm px-2 py-1 rounded shadow-lg pointer-events-none z-50"
+              style="left: {dragTooltip.x}px; top: {dragTooltip.y}px; transform: translateX(-50%)"
+            >
+              {formatHour(dragTooltip.hour)}
+            </div>
+          {/if}
+
+          <!-- Indicateur heure actuelle -->
+          {#if true}
+            {@const now = new Date()}
+            {@const currentPos = (now.getHours() + now.getMinutes() / 60) / 24 * 100}
+            <div
+              class="absolute top-6 bottom-0 w-0.5 bg-white/70 pointer-events-none"
+              style="left: {currentPos}%"
+            >
+              <div class="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-white rounded-full"></div>
+            </div>
+          {/if}
+        </div>
+
+        <!-- Légende et actions -->
+        <div class="mt-3 flex items-center justify-between text-xs">
+          <div class="flex gap-3">
+            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-cyan-500"></span> Auto</span>
+            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-purple-500"></span> AI</span>
+            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-yellow-500"></span> Manual</span>
+            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-green-500"></span> Passive</span>
+          </div>
+          <span class="text-slate-500">Glisser les frontières pour ajuster</span>
         </div>
       </div>
 
@@ -653,39 +855,12 @@
         <div class="space-y-4">
           <div>
             <span class="text-slate-400 text-sm">Mode</span>
-            <div class="flex gap-2 mt-1">
-              <select
-                value={data.mode.mode}
-                onchange={handleModeChange}
-                disabled={changingMode}
-                class="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-xl font-bold text-purple-400 focus:outline-none focus:border-purple-500 disabled:opacity-50 cursor-pointer"
-              >
-                <option value="Auto">Auto</option>
-                <option value="AI">AI</option>
-                <option value="Manual">Manual</option>
-                <option value="Passive">Passive</option>
-              </select>
-              {#if data.mode.mode === 'Manual' || data.mode.mode === 'Passive'}
-                <button
-                  onclick={openModeConfig}
-                  disabled={changingMode}
-                  class="px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 disabled:opacity-50 transition-colors"
-                  title="Modifier la configuration du mode"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                  </svg>
-                </button>
-              {/if}
-            </div>
-            {#if changingMode}
-              <span class="text-xs text-slate-500">Changement en cours...</span>
-            {/if}
+            <div class="text-lg font-medium text-white">{data.mode.mode ?? 'N/A'}</div>
           </div>
 
           <div>
             <span class="text-slate-400 text-sm">Statut</span>
-            <div class="text-xl font-bold {isCharging ? 'text-yellow-400' : isDischarging ? 'text-green-400' : 'text-slate-400'}">
+            <div class="text-xl font-bold {isCharging ? 'text-blue-400' : isDischarging ? 'text-red-400' : 'text-slate-400'}">
               {isCharging ? '⚡ CHARGE' : isDischarging ? '⬆ INJECTION' : '⏸ VEILLE'}
             </div>
           </div>
@@ -777,175 +952,177 @@
     </div>
   {/if}
 
-  <!-- Modal de configuration du mode -->
-  {#if showModeModal}
+  <!-- Modal d'édition de plage horaire -->
+  {#if showSlotModal && editingSlot}
     <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
       <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 w-full max-w-md">
         <h3 class="text-xl font-bold text-white mb-4">
-          Configuration mode {pendingMode}
+          Modifier la plage
         </h3>
 
-        {#if modeError}
-          <div class="mb-4 p-3 bg-red-900/50 border border-red-500 rounded-lg text-red-200 text-sm">
-            {modeError}
+        <div class="space-y-4">
+          <!-- Mode -->
+          <fieldset>
+            <legend class="block text-slate-400 text-sm mb-2">Mode</legend>
+            <div class="grid grid-cols-4 gap-2">
+              <button
+                type="button"
+                onclick={() => editingSlot && (editingSlot.mode = 'Auto')}
+                class="px-3 py-2 rounded-lg text-sm font-medium transition-all {editingSlot.mode === 'Auto' ? 'bg-cyan-500 text-white ring-2 ring-cyan-300' : 'bg-cyan-500/30 text-cyan-300 hover:bg-cyan-500/50'}"
+              >
+                Auto
+              </button>
+              <button
+                type="button"
+                onclick={() => editingSlot && (editingSlot.mode = 'AI')}
+                class="px-3 py-2 rounded-lg text-sm font-medium transition-all {editingSlot.mode === 'AI' ? 'bg-purple-500 text-white ring-2 ring-purple-300' : 'bg-purple-500/30 text-purple-300 hover:bg-purple-500/50'}"
+              >
+                AI
+              </button>
+              <button
+                type="button"
+                onclick={() => editingSlot && (editingSlot.mode = 'Manual')}
+                class="px-3 py-2 rounded-lg text-sm font-medium transition-all {editingSlot.mode === 'Manual' ? 'bg-yellow-500 text-white ring-2 ring-yellow-300' : 'bg-yellow-500/30 text-yellow-300 hover:bg-yellow-500/50'}"
+              >
+                Manual
+              </button>
+              <button
+                type="button"
+                onclick={() => editingSlot && (editingSlot.mode = 'Passive')}
+                class="px-3 py-2 rounded-lg text-sm font-medium transition-all {editingSlot.mode === 'Passive' ? 'bg-green-500 text-white ring-2 ring-green-300' : 'bg-green-500/30 text-green-300 hover:bg-green-500/50'}"
+              >
+                Passive
+              </button>
+            </div>
+          </fieldset>
+
+          <!-- Heures (lecture seule - ajuster via drag sur le ruban) -->
+          <div class="flex items-center gap-2 text-slate-400 text-sm">
+            <span>{formatHour(editingSlot.startHour)}</span>
+            <span class="flex-1 h-px bg-slate-600"></span>
+            <span>{formatHour(editingSlot.endHour === 24 ? 0 : editingSlot.endHour)}</span>
           </div>
-        {/if}
 
-        {#if pendingMode === 'Manual'}
-          <div class="space-y-4">
-            <div>
-              <label class="block text-slate-400 text-sm mb-1">Numéro de plage (0-9)</label>
-              <input
-                type="number"
-                min="0"
-                max="9"
-                bind:value={manualConfig.time_num}
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
-              />
-            </div>
+          <!-- Config spécifique si Manual ou Passive -->
+          {#if editingSlot.mode === 'Manual' || editingSlot.mode === 'Passive'}
+            <div class="border-t border-slate-600 pt-4 mt-4">
+              <p class="text-slate-400 text-sm mb-3">Configuration {editingSlot.mode}</p>
 
-            <div class="grid grid-cols-2 gap-4">
-              <div>
-                <label class="block text-slate-400 text-sm mb-1">Heure début</label>
-                <input
-                  type="time"
-                  bind:value={manualConfig.start_time}
-                  class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
-                />
-              </div>
-              <div>
-                <label class="block text-slate-400 text-sm mb-1">Heure fin</label>
-                <input
-                  type="time"
-                  bind:value={manualConfig.end_time}
-                  class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label class="block text-slate-400 text-sm mb-2">Jours de la semaine</label>
-              <div class="flex flex-wrap gap-2">
-                {#each weekDays as day}
+              <!-- Direction -->
+              <fieldset class="mb-3">
+                <legend class="block text-slate-400 text-xs mb-1">Direction</legend>
+                <div class="flex gap-2">
                   <button
                     type="button"
-                    onclick={() => toggleWeekDay(day.bit)}
-                    class="px-3 py-1 rounded-lg text-sm font-medium transition-colors {manualConfig.week_set & day.bit ? 'bg-purple-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
+                    onclick={() => {
+                      if (!editingSlot) return;
+                      if (!editingSlot.config) editingSlot.config = {};
+                      editingSlot.config.isCharge = true;
+                      editingSlot = { ...editingSlot };
+                    }}
+                    class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {editingSlot.config?.isCharge ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
                   >
-                    {day.label}
+                    Charge
                   </button>
-                {/each}
+                  <button
+                    type="button"
+                    onclick={() => {
+                      if (!editingSlot) return;
+                      if (!editingSlot.config) editingSlot.config = {};
+                      editingSlot.config.isCharge = false;
+                      editingSlot = { ...editingSlot };
+                    }}
+                    class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {editingSlot.config?.isCharge === false ? 'bg-red-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
+                  >
+                    Décharge
+                  </button>
+                </div>
+              </fieldset>
+
+              <!-- Puissance -->
+              <div class="mb-3">
+                <label for="slot-power" class="block text-slate-400 text-xs mb-1">Puissance (W)</label>
+                <input
+                  id="slot-power"
+                  type="number"
+                  min="0"
+                  max="2000"
+                  step="100"
+                  value={editingSlot.config?.power ?? 800}
+                  onchange={(e) => {
+                    if (!editingSlot) return;
+                    if (!editingSlot.config) editingSlot.config = {};
+                    editingSlot.config.power = parseInt((e.target as HTMLInputElement).value) || 800;
+                    editingSlot = { ...editingSlot };
+                  }}
+                  class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                />
               </div>
-            </div>
 
-            <div>
-              <label class="block text-slate-400 text-sm mb-2">Direction</label>
-              <div class="flex gap-2">
-                <button
-                  type="button"
-                  onclick={() => manualConfig.isCharge = true}
-                  class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {manualConfig.isCharge ? 'bg-yellow-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
-                >
-                  ⚡ Charge
-                </button>
-                <button
-                  type="button"
-                  onclick={() => manualConfig.isCharge = false}
-                  class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {!manualConfig.isCharge ? 'bg-green-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
-                >
-                  ⬆ Décharge
-                </button>
-              </div>
+              <!-- Countdown pour Passive -->
+              {#if editingSlot.mode === 'Passive'}
+                <div>
+                  <label for="slot-countdown" class="block text-slate-400 text-xs mb-1">Countdown (secondes)</label>
+                  <input
+                    id="slot-countdown"
+                    type="number"
+                    min="0"
+                    max="86400"
+                    step="60"
+                    value={editingSlot.config?.cd_time ?? 300}
+                    onchange={(e) => {
+                      if (!editingSlot) return;
+                      if (!editingSlot.config) editingSlot.config = {};
+                      editingSlot.config.cd_time = parseInt((e.target as HTMLInputElement).value) || 300;
+                      editingSlot = { ...editingSlot };
+                    }}
+                    class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              {/if}
             </div>
+          {/if}
+        </div>
 
-            <div>
-              <label class="block text-slate-400 text-sm mb-1">Puissance (W)</label>
-              <input
-                type="number"
-                min="0"
-                max="2000"
-                step="100"
-                bind:value={manualConfig.power}
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
-              />
-            </div>
-
-            <div class="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="manual-enable"
-                checked={manualConfig.enable === 1}
-                onchange={(e) => manualConfig.enable = (e.target as HTMLInputElement).checked ? 1 : 0}
-                class="w-4 h-4 accent-purple-500"
-              />
-              <label for="manual-enable" class="text-slate-300">Activer cette plage</label>
-            </div>
-          </div>
-
-        {:else if pendingMode === 'Passive'}
-          <div class="space-y-4">
-            <div>
-              <label class="block text-slate-400 text-sm mb-2">Direction</label>
-              <div class="flex gap-2">
-                <button
-                  type="button"
-                  onclick={() => passiveConfig.isCharge = true}
-                  class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {passiveConfig.isCharge ? 'bg-yellow-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
-                >
-                  ⚡ Charge
-                </button>
-                <button
-                  type="button"
-                  onclick={() => passiveConfig.isCharge = false}
-                  class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {!passiveConfig.isCharge ? 'bg-green-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
-                >
-                  ⬆ Décharge
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label class="block text-slate-400 text-sm mb-1">Puissance (W)</label>
-              <input
-                type="number"
-                min="0"
-                max="2000"
-                step="100"
-                bind:value={passiveConfig.power}
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
-              />
-            </div>
-
-            <div>
-              <label class="block text-slate-400 text-sm mb-1">Durée countdown (secondes)</label>
-              <input
-                type="number"
-                min="0"
-                max="86400"
-                step="60"
-                bind:value={passiveConfig.cd_time}
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
-              />
-              <p class="text-slate-500 text-xs mt-1">Durée pendant laquelle le mode reste actif (ex: 300 = 5 min)</p>
-            </div>
-          </div>
-        {/if}
-
-        <div class="flex gap-3 mt-6">
+        <div class="flex gap-2 mt-6">
+          {#if timeSlots.length > 1}
+            <button
+              onclick={() => editingSlot && deleteSlot(editingSlot.id)}
+              class="p-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors"
+              title="Supprimer cette plage"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          {/if}
           <button
-            onclick={cancelModeChange}
-            disabled={changingMode}
-            class="flex-1 px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
+            onclick={() => editingSlot && addSlotAfter(editingSlot)}
+            class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors"
+            title="Diviser cette plage en deux"
+          >
+            Diviser
+          </button>
+          <div class="flex-1"></div>
+          <button
+            onclick={() => { showSlotModal = false; editingSlot = null; }}
+            class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors"
           >
             Annuler
           </button>
-          <button
-            onclick={pendingMode === 'Manual' ? applyManualMode : applyPassiveMode}
-            disabled={changingMode}
-            class="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
-          >
-            {changingMode ? 'Application...' : 'Appliquer'}
-          </button>
+          {#if true}
+            {@const needsConfig = editingSlot?.mode === 'Manual' || editingSlot?.mode === 'Passive'}
+            {@const hasDirection = editingSlot?.config?.isCharge !== undefined}
+            {@const canSave = !needsConfig || hasDirection}
+            <button
+              onclick={saveSlot}
+              disabled={!canSave}
+              class="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+              title={!canSave ? 'Choisir Charge ou Décharge' : ''}
+            >
+              Sauvegarder
+            </button>
+          {/if}
         </div>
       </div>
     </div>
