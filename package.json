@@ -1,0 +1,12 @@
+{
+  "name": "marstek",
+  "version": "1.0.0",
+  "description": "Client Node.js pour l'API Marstek (batterie solaire)",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "keywords": ["marstek", "solar", "battery", "energy"],
+  "author": "",
+  "license": "ISC"
+}
