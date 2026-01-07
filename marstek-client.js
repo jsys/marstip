@@ -89,6 +89,42 @@ function sendCommand(command) {
   });
 }
 
+async function setMode(mode, config = {}) {
+  // Construire le payload selon le mode
+  let modeConfig;
+
+  switch (mode) {
+    case 'Auto':
+      modeConfig = { mode: 'Auto', auto_cfg: { enable: 1 } };
+      break;
+    case 'AI':
+      modeConfig = { mode: 'AI', ai_cfg: { enable: 1 } };
+      break;
+    case 'Manual':
+      if (!config.manual_cfg) {
+        throw new Error('Manual mode requires manual_cfg');
+      }
+      modeConfig = { mode: 'Manual', manual_cfg: config.manual_cfg };
+      break;
+    case 'Passive':
+      if (!config.passive_cfg) {
+        throw new Error('Passive mode requires passive_cfg');
+      }
+      modeConfig = { mode: 'Passive', passive_cfg: config.passive_cfg };
+      break;
+    default:
+      throw new Error(`Unknown mode: ${mode}`);
+  }
+
+  const result = await sendCommand({
+    id: 7,
+    method: 'ES.SetMode',
+    params: { id: 0, config: modeConfig }
+  });
+
+  return result;
+}
+
 async function getDashboard() {
   // Appels séquentiels - le device ne gère qu'une requête UDP à la fois
   const device = await sendCommand({ id: 1, method: 'Marstek.GetDevice', params: { ble_mac: '0' } }).catch(() => ({}));
@@ -109,4 +145,4 @@ async function getDashboard() {
   };
 }
 
-module.exports = { sendCommand, getDashboard, discoverDevices, setDevice, getDevice };
+module.exports = { sendCommand, getDashboard, setMode, discoverDevices, setDevice, getDevice };

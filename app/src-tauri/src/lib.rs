@@ -185,6 +185,70 @@ fn get_device(state: State<AppState>) -> Result<DeviceConfigResponse, String> {
     })
 }
 
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct SetModeConfig {
+    mode: String,
+    #[serde(default)]
+    auto_cfg: Option<serde_json::Value>,
+    #[serde(default)]
+    ai_cfg: Option<serde_json::Value>,
+    #[serde(default)]
+    manual_cfg: Option<serde_json::Value>,
+    #[serde(default)]
+    passive_cfg: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+fn set_mode(state: State<AppState>, mode: String, config: Option<serde_json::Value>) -> Result<bool, String> {
+    let (ip, port) = {
+        let device_config = state.device.lock().map_err(|e| e.to_string())?;
+        let ip = device_config.ip.clone().ok_or("Device not configured. Call set_device first.")?;
+        (ip, device_config.port)
+    };
+
+    // Construire le payload selon le mode
+    let mode_config = match mode.as_str() {
+        "Auto" => serde_json::json!({
+            "mode": "Auto",
+            "auto_cfg": { "enable": 1 }
+        }),
+        "AI" => serde_json::json!({
+            "mode": "AI",
+            "ai_cfg": { "enable": 1 }
+        }),
+        "Manual" => {
+            // Config doit contenir manual_cfg avec time_num, start_time, end_time, week_set, power, enable
+            let cfg = config.ok_or("Manual mode requires config with manual_cfg")?;
+            let manual_cfg = cfg.get("manual_cfg").ok_or("Missing manual_cfg in config")?;
+            serde_json::json!({
+                "mode": "Manual",
+                "manual_cfg": manual_cfg
+            })
+        },
+        "Passive" => {
+            // Config doit contenir passive_cfg avec power, cd_time
+            let cfg = config.ok_or("Passive mode requires config with passive_cfg")?;
+            let passive_cfg = cfg.get("passive_cfg").ok_or("Missing passive_cfg in config")?;
+            serde_json::json!({
+                "mode": "Passive",
+                "passive_cfg": passive_cfg
+            })
+        },
+        _ => return Err(format!("Unknown mode: {}", mode)),
+    };
+
+    let params = serde_json::json!({
+        "id": 0,
+        "config": mode_config
+    });
+
+    let result = send_command(&ip, port, "ES.SetMode", params)?;
+
+    // Retourner set_result si présent, sinon true si pas d'erreur
+    Ok(result.get("set_result").and_then(|v| v.as_bool()).unwrap_or(true))
+}
+
 #[tauri::command]
 fn get_dashboard(state: State<AppState>) -> Result<DashboardData, String> {
     let (ip, port) = {
@@ -252,7 +316,8 @@ pub fn run() {
             get_dashboard,
             discover_devices,
             set_device,
-            get_device
+            get_device,
+            set_mode
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -57,6 +57,12 @@
   let loading = $state(true);
   let interval: ReturnType<typeof setInterval>;
 
+  // Derived values
+  let soc = $derived((data as DashboardData | null)?.battery?.soc ?? (data as DashboardData | null)?.energy?.bat_soc ?? 0);
+  let isCharging = $derived(((data as DashboardData | null)?.energy?.ongrid_power ?? 0) < 0);
+  let isDischarging = $derived(((data as DashboardData | null)?.energy?.ongrid_power ?? 0) > 0);
+  let socColor = $derived(soc < 20 ? 'bg-red-500' : soc < 50 ? 'bg-yellow-500' : 'bg-green-500');
+
   // Auto-discovery states
   let discovering = $state(true);
   let deviceConfigured = $state(false);
@@ -70,6 +76,86 @@
   let fetching = $state(false);
   let lastResponseTime = $state(0);
   let currentInterval = $state(3000);
+
+  // Mode change states
+  let showModeModal = $state(false);
+  let pendingMode = $state<string | null>(null);
+  let changingMode = $state(false);
+  let modeError = $state<string | null>(null);
+
+  // Manual mode config
+  let manualConfig = $state({
+    time_num: 0,
+    start_time: '22:00',
+    end_time: '06:00',
+    week_set: 127, // Tous les jours
+    power: 800,
+    isCharge: true, // true = charge (power négatif envoyé), false = décharge
+    enable: 1
+  });
+
+  // Passive mode config
+  let passiveConfig = $state({
+    power: 800,
+    isCharge: false, // true = charge, false = décharge
+    cd_time: 300
+  });
+
+  // Saved configs in localStorage
+  let hasSavedManualConfig = $state(false);
+  let hasSavedPassiveConfig = $state(false);
+
+  // Storage keys
+  const STORAGE_KEY_MANUAL = 'marstip_manual_config';
+  const STORAGE_KEY_PASSIVE = 'marstip_passive_config';
+
+  function loadSavedConfigs() {
+    try {
+      const savedManual = localStorage.getItem(STORAGE_KEY_MANUAL);
+      if (savedManual) {
+        const parsed = JSON.parse(savedManual);
+        Object.assign(manualConfig, parsed);
+        hasSavedManualConfig = true;
+      }
+      const savedPassive = localStorage.getItem(STORAGE_KEY_PASSIVE);
+      if (savedPassive) {
+        const parsed = JSON.parse(savedPassive);
+        Object.assign(passiveConfig, parsed);
+        hasSavedPassiveConfig = true;
+      }
+    } catch (e) {
+      console.error('Error loading saved configs:', e);
+    }
+  }
+
+  function saveManualConfig() {
+    try {
+      localStorage.setItem(STORAGE_KEY_MANUAL, JSON.stringify(manualConfig));
+      hasSavedManualConfig = true;
+    } catch (e) {
+      console.error('Error saving manual config:', e);
+    }
+  }
+
+  function savePassiveConfig() {
+    try {
+      localStorage.setItem(STORAGE_KEY_PASSIVE, JSON.stringify(passiveConfig));
+      hasSavedPassiveConfig = true;
+    } catch (e) {
+      console.error('Error saving passive config:', e);
+    }
+  }
+
+  // Jours de la semaine pour week_set
+  const weekDays = [
+    { bit: 1, label: 'Lun' },
+    { bit: 2, label: 'Mar' },
+    { bit: 4, label: 'Mer' },
+    { bit: 8, label: 'Jeu' },
+    { bit: 16, label: 'Ven' },
+    { bit: 32, label: 'Sam' },
+    { bit: 64, label: 'Dim' }
+  ];
 
   // Calcule l'intervalle optimal selon le temps de réponse
   function getOptimalInterval(responseTime: number, hasError: boolean): number {
@@ -175,6 +261,9 @@
   }
 
   onMount(async () => {
+    // Charger les configs sauvegardées
+    loadSavedConfigs();
+
     if (isTauri()) {
       // Mode Tauri - auto-découverte
       discovering = true;
@@ -232,10 +321,110 @@
     return `${(wh / 1000).toFixed(1)} kWh`;
   }
 
-  let soc = $derived(data?.battery?.soc ?? data?.energy?.bat_soc ?? 0);
-  let isCharging = $derived((data?.energy?.ongrid_power ?? 0) < 0);
-  let isDischarging = $derived((data?.energy?.ongrid_power ?? 0) > 0);
-  let socColor = $derived(soc < 20 ? 'bg-red-500' : soc < 50 ? 'bg-yellow-500' : 'bg-green-500');
+  async function handleModeChange(e: Event) {
+    const newMode = (e.target as HTMLSelectElement).value;
+    modeError = null;
+
+    if (newMode === 'Manual') {
+      if (hasSavedManualConfig) {
+        // Config sauvegardée: appliquer directement
+        await applyManualMode();
+      } else {
+        // Pas de config: ouvrir le popup
+        pendingMode = newMode;
+        showModeModal = true;
+      }
+    } else if (newMode === 'Passive') {
+      if (hasSavedPassiveConfig) {
+        // Config sauvegardée: appliquer directement
+        await applyPassiveMode();
+      } else {
+        // Pas de config: ouvrir le popup
+        pendingMode = newMode;
+        showModeModal = true;
+      }
+    } else {
+      await applyMode(newMode);
+    }
+  }
+
+  function openModeConfig() {
+    const currentMode = data?.mode?.mode;
+    if (currentMode === 'Manual' || currentMode === 'Passive') {
+      pendingMode = currentMode;
+      showModeModal = true;
+    }
+  }
+
+  async function applyMode(mode: string, config?: object) {
+    changingMode = true;
+    modeError = null;
+
+    try {
+      if (isTauri()) {
+        await invoke('set_mode', { mode, config });
+      } else {
+        const res = await fetch('/api/set-mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode, config })
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Erreur lors du changement de mode');
+        }
+      }
+      showModeModal = false;
+      pendingMode = null;
+      await fetchData();
+    } catch (e) {
+      modeError = String(e);
+    } finally {
+      changingMode = false;
+    }
+  }
+
+  function applyManualMode() {
+    // Sauvegarder la config
+    saveManualConfig();
+    // Calculer la puissance avec le signe (négatif = charge)
+    const power = manualConfig.isCharge ? -Math.abs(manualConfig.power) : Math.abs(manualConfig.power);
+    const cfg = {
+      time_num: manualConfig.time_num,
+      start_time: manualConfig.start_time,
+      end_time: manualConfig.end_time,
+      week_set: manualConfig.week_set,
+      power,
+      enable: manualConfig.enable
+    };
+    applyMode('Manual', { manual_cfg: cfg });
+  }
+
+  function applyPassiveMode() {
+    // Sauvegarder la config
+    savePassiveConfig();
+    // Calculer la puissance avec le signe (négatif = charge)
+    const power = passiveConfig.isCharge ? -Math.abs(passiveConfig.power) : Math.abs(passiveConfig.power);
+    const cfg = {
+      power,
+      cd_time: passiveConfig.cd_time
+    };
+    applyMode('Passive', { passive_cfg: cfg });
+  }
+
+  function cancelModeChange() {
+    showModeModal = false;
+    pendingMode = null;
+    modeError = null;
+  }
+
+  function toggleWeekDay(bit: number) {
+    if (manualConfig.week_set & bit) {
+      manualConfig.week_set &= ~bit;
+    } else {
+      manualConfig.week_set |= bit;
+    }
+  }
 </script>
 
 <main class="min-h-screen bg-slate-900 p-6">
@@ -464,7 +653,34 @@
         <div class="space-y-4">
           <div>
             <span class="text-slate-400 text-sm">Mode</span>
-            <div class="text-xl font-bold text-purple-400">{data.mode.mode}</div>
+            <div class="flex gap-2 mt-1">
+              <select
+                value={data.mode.mode}
+                onchange={handleModeChange}
+                disabled={changingMode}
+                class="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-xl font-bold text-purple-400 focus:outline-none focus:border-purple-500 disabled:opacity-50 cursor-pointer"
+              >
+                <option value="Auto">Auto</option>
+                <option value="AI">AI</option>
+                <option value="Manual">Manual</option>
+                <option value="Passive">Passive</option>
+              </select>
+              {#if data.mode.mode === 'Manual' || data.mode.mode === 'Passive'}
+                <button
+                  onclick={openModeConfig}
+                  disabled={changingMode}
+                  class="px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 disabled:opacity-50 transition-colors"
+                  title="Modifier la configuration du mode"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                </button>
+              {/if}
+            </div>
+            {#if changingMode}
+              <span class="text-xs text-slate-500">Changement en cours...</span>
+            {/if}
           </div>
 
           <div>
@@ -558,6 +774,180 @@
         </div>
       </div>
 
+    </div>
+  {/if}
+
+  <!-- Modal de configuration du mode -->
+  {#if showModeModal}
+    <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 w-full max-w-md">
+        <h3 class="text-xl font-bold text-white mb-4">
+          Configuration mode {pendingMode}
+        </h3>
+
+        {#if modeError}
+          <div class="mb-4 p-3 bg-red-900/50 border border-red-500 rounded-lg text-red-200 text-sm">
+            {modeError}
+          </div>
+        {/if}
+
+        {#if pendingMode === 'Manual'}
+          <div class="space-y-4">
+            <div>
+              <label class="block text-slate-400 text-sm mb-1">Numéro de plage (0-9)</label>
+              <input
+                type="number"
+                min="0"
+                max="9"
+                bind:value={manualConfig.time_num}
+                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
+              />
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-slate-400 text-sm mb-1">Heure début</label>
+                <input
+                  type="time"
+                  bind:value={manualConfig.start_time}
+                  class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
+                />
+              </div>
+              <div>
+                <label class="block text-slate-400 text-sm mb-1">Heure fin</label>
+                <input
+                  type="time"
+                  bind:value={manualConfig.end_time}
+                  class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-slate-400 text-sm mb-2">Jours de la semaine</label>
+              <div class="flex flex-wrap gap-2">
+                {#each weekDays as day}
+                  <button
+                    type="button"
+                    onclick={() => toggleWeekDay(day.bit)}
+                    class="px-3 py-1 rounded-lg text-sm font-medium transition-colors {manualConfig.week_set & day.bit ? 'bg-purple-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
+                  >
+                    {day.label}
+                  </button>
+                {/each}
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-slate-400 text-sm mb-2">Direction</label>
+              <div class="flex gap-2">
+                <button
+                  type="button"
+                  onclick={() => manualConfig.isCharge = true}
+                  class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {manualConfig.isCharge ? 'bg-yellow-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
+                >
+                  ⚡ Charge
+                </button>
+                <button
+                  type="button"
+                  onclick={() => manualConfig.isCharge = false}
+                  class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {!manualConfig.isCharge ? 'bg-green-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
+                >
+                  ⬆ Décharge
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-slate-400 text-sm mb-1">Puissance (W)</label>
+              <input
+                type="number"
+                min="0"
+                max="2000"
+                step="100"
+                bind:value={manualConfig.power}
+                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
+              />
+            </div>
+
+            <div class="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="manual-enable"
+                checked={manualConfig.enable === 1}
+                onchange={(e) => manualConfig.enable = (e.target as HTMLInputElement).checked ? 1 : 0}
+                class="w-4 h-4 accent-purple-500"
+              />
+              <label for="manual-enable" class="text-slate-300">Activer cette plage</label>
+            </div>
+          </div>
+
+        {:else if pendingMode === 'Passive'}
+          <div class="space-y-4">
+            <div>
+              <label class="block text-slate-400 text-sm mb-2">Direction</label>
+              <div class="flex gap-2">
+                <button
+                  type="button"
+                  onclick={() => passiveConfig.isCharge = true}
+                  class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {passiveConfig.isCharge ? 'bg-yellow-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
+                >
+                  ⚡ Charge
+                </button>
+                <button
+                  type="button"
+                  onclick={() => passiveConfig.isCharge = false}
+                  class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {!passiveConfig.isCharge ? 'bg-green-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
+                >
+                  ⬆ Décharge
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-slate-400 text-sm mb-1">Puissance (W)</label>
+              <input
+                type="number"
+                min="0"
+                max="2000"
+                step="100"
+                bind:value={passiveConfig.power}
+                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
+              />
+            </div>
+
+            <div>
+              <label class="block text-slate-400 text-sm mb-1">Durée countdown (secondes)</label>
+              <input
+                type="number"
+                min="0"
+                max="86400"
+                step="60"
+                bind:value={passiveConfig.cd_time}
+                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
+              />
+              <p class="text-slate-500 text-xs mt-1">Durée pendant laquelle le mode reste actif (ex: 300 = 5 min)</p>
+            </div>
+          </div>
+        {/if}
+
+        <div class="flex gap-3 mt-6">
+          <button
+            onclick={cancelModeChange}
+            disabled={changingMode}
+            class="flex-1 px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
+          >
+            Annuler
+          </button>
+          <button
+            onclick={pendingMode === 'Manual' ? applyManualMode : applyPassiveMode}
+            disabled={changingMode}
+            class="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
+          >
+            {changingMode ? 'Application...' : 'Appliquer'}
+          </button>
+        </div>
+      </div>
     </div>
   {/if}
 </main>
