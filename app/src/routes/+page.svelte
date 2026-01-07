@@ -46,7 +46,12 @@
 
   async function fetchData() {
     try {
-      data = await invoke<DashboardData>('get_dashboard');
+      if (window.__TAURI__) {
+        data = await invoke<DashboardData>('get_dashboard');
+      } else {
+        const res = await fetch('/api/dashboard');
+        data = await res.json();
+      }
       error = null;
     } catch (e) {
       error = String(e);
