@@ -113,6 +113,10 @@
   // Visibility state (pause polling when minimized)
   let isVisible = $state(true);
 
+  // Temporary error tracking (os error 35)
+  let tempErrorCount = $state(0);
+  let tempErrorSince = $state<number | null>(null);
+
   // Storage keys
   const STORAGE_KEY_SLOTS = 'time_slots';
   const STORAGE_KEY_SCHEDULER = 'scheduler_enabled';
@@ -394,9 +398,24 @@
         data = await res.json();
       }
       error = null;
+      // Reset temp error on success
+      tempErrorCount = 0;
+      tempErrorSince = null;
     } catch (e) {
-      error = String(e);
-      hasError = true;
+      const errStr = String(e);
+      // Erreur temporaire : ne pas afficher l'écran d'erreur, juste tracker
+      if (errStr.includes('os error 35') || errStr.includes('Resource temporarily unavailable')) {
+        tempErrorCount++;
+        if (!tempErrorSince) tempErrorSince = Date.now();
+        hasError = true;
+        // Ne pas mettre error, garder les données précédentes
+      } else {
+        error = errStr;
+        hasError = true;
+        // Reset temp error pour une vraie erreur
+        tempErrorCount = 0;
+        tempErrorSince = null;
+      }
     } finally {
       loading = false;
       fetching = false;
@@ -605,9 +624,12 @@
       <span class="text-2xl">⚡</span>
       <h1 class="text-xl font-bold text-white">MarsTip</h1>
       <span
-        class="w-2 h-2 rounded-full transition-all duration-150 {fetching ? 'bg-cyan-400 shadow-[0_0_8px_2px_rgba(34,211,238,0.6)]' : 'bg-slate-600'}"
-        title={fetching ? 'Requête en cours...' : 'En attente'}
+        class="w-2 h-2 rounded-full transition-all duration-150 {fetching ? 'bg-cyan-400 shadow-[0_0_8px_2px_rgba(34,211,238,0.6)]' : tempErrorCount > 0 ? 'bg-orange-400' : 'bg-slate-600'}"
+        title={fetching ? 'Requête en cours...' : tempErrorCount > 0 ? `${tempErrorCount} échec(s)` : 'En attente'}
       ></span>
+      {#if tempErrorCount > 0 && tempErrorSince}
+        <span class="text-orange-400 text-xs">{tempErrorCount} échec{tempErrorCount > 1 ? 's' : ''} depuis {Math.round((Date.now() - tempErrorSince) / 1000)}s</span>
+      {/if}
     </div>
     <div class="flex items-center gap-2">
       {#if deviceConfigured && !showDeviceSelector && data}
@@ -875,7 +897,7 @@
           {#if data.meter.ct_state === 1}
             <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
               <h2 class="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
-                <span>📊</span> Conso maison
+                <span>📊</span> Compteur CT
               </h2>
               <div class="flex items-center justify-between">
                 <div class="flex gap-4 text-xs">
@@ -883,7 +905,7 @@
                   <span class="text-slate-400">B: <span class="text-white">{formatPower(data.meter.b_power)}</span></span>
                   <span class="text-slate-400">C: <span class="text-white">{formatPower(data.meter.c_power)}</span></span>
                 </div>
-                <span class="text-cyan-400 font-bold">{formatPower(data.meter.total_power)}</span>
+                <span class="{(data.meter.total_power ?? 0) < 0 ? 'text-blue-400' : 'text-red-400'} font-bold">{formatPower(data.meter.total_power)}</span>
               </div>
             </div>
           {/if}
@@ -962,7 +984,7 @@
                 </div>
                 <div class="border-t border-slate-600 pt-2 flex justify-between">
                   <span class="text-slate-300">Total</span>
-                  <span class="text-cyan-400 font-bold">{formatPower(data.meter.total_power)}</span>
+                  <span class="{(data.meter.total_power ?? 0) < 0 ? 'text-blue-400' : 'text-red-400'} font-bold">{formatPower(data.meter.total_power)}</span>
                 </div>
               </div>
             </div>
