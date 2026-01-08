@@ -1194,4 +1194,10 @@
       </div>
     </div>
   {/if}
+
+  <footer class="mt-auto pt-2 text-center">
+    <a href="http://to.jsys.fr/Rg1F9B" target="_blank" class="text-slate-500 hover:text-slate-400 text-xs transition-colors">
+      https://github.com/jsys/marstip
+    </a>
+  </footer>
 </main>
