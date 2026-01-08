@@ -447,6 +447,32 @@
     loading = true;
   }
 
+  async function retryDiscovery() {
+    if (!isTauriEnv) return;
+    discovering = true;
+    discoveryError = null;
+    allDevices = [];
+
+    try {
+      const devices = await invoke<DiscoveredDevice[]>('discover_devices');
+      allDevices = devices;
+
+      if (devices.length === 0) {
+        discoveryError = 'no_device';
+      } else if (devices.length === 1) {
+        const device = devices[0];
+        await invoke('set_device', { ip: device.ip, port: device.port });
+        deviceConfigured = true;
+        startDashboard();
+      } else {
+        showDeviceSelector = true;
+      }
+    } catch (e) {
+      discoveryError = String(e);
+    }
+    discovering = false;
+  }
+
   function startDashboard() {
     currentInterval = 3000; // Reset à l'intervalle rapide au démarrage
     fetchData();
@@ -544,6 +570,35 @@
   }
 </script>
 
+{#snippet manualIpForm()}
+  <div class="flex gap-2">
+    <input
+      type="text"
+      placeholder="192.168.1.xxx"
+      bind:value={manualIp}
+      disabled={connecting}
+      onkeydown={(e) => e.key === 'Enter' && connectManual()}
+      class="flex-1 min-w-0 px-3 py-2 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+    />
+    <input
+      type="text"
+      placeholder="30000"
+      bind:value={manualPort}
+      disabled={connecting}
+      onkeydown={(e) => e.key === 'Enter' && connectManual()}
+      class="w-20 px-2 py-2 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 text-center disabled:opacity-50"
+    />
+    <button
+      onclick={connectManual}
+      disabled={connecting || !manualIp.trim()}
+      class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-800 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors whitespace-nowrap"
+    >
+      {connecting ? 'Connexion...' : 'Connecter'}
+    </button>
+  </div>
+  <p class="text-slate-500 text-xs mt-2">Port par défaut : 30000</p>
+{/snippet}
+
 <main class="h-screen bg-slate-900 p-4 overflow-hidden flex flex-col">
   <header class="mb-4 flex justify-between items-center">
     <div class="flex items-center gap-2">
@@ -593,7 +648,7 @@
     </div>
 
   {:else if showDeviceSelector}
-    <div class="max-w-2xl mx-auto">
+    <div class="w-full max-w-2xl mx-auto">
       <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 mb-6">
         <h3 class="text-xl font-bold text-white mb-4 flex items-center gap-2">
           <span class="text-2xl">🔋</span>
@@ -624,81 +679,40 @@
           <p class="text-slate-400 text-sm mb-3">
             {allDevices.length > 0 ? 'Ou entrez une adresse IP manuellement :' : 'Entrez l\'adresse IP de la batterie :'}
           </p>
-          <div class="flex gap-2">
-            <input
-              type="text"
-              placeholder="192.168.1.xxx"
-              bind:value={manualIp}
-              disabled={connecting}
-              onkeydown={(e) => e.key === 'Enter' && connectManual()}
-              class="flex-1 px-4 py-2 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
-            />
-            <input
-              type="text"
-              placeholder="30000"
-              bind:value={manualPort}
-              disabled={connecting}
-              onkeydown={(e) => e.key === 'Enter' && connectManual()}
-              class="w-24 px-4 py-2 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 text-center disabled:opacity-50"
-            />
-            <button
-              onclick={connectManual}
-              disabled={connecting || !manualIp.trim()}
-              class="px-6 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-800 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors min-w-[120px]"
-            >
-              {connecting ? 'Connexion...' : 'Connecter'}
-            </button>
-          </div>
-          <p class="text-slate-500 text-xs mt-2">Port par défaut : 30000</p>
+          {@render manualIpForm()}
         </div>
       </div>
     </div>
 
   {:else if discoveryError}
-    <div class="bg-amber-900/50 border border-amber-500 rounded-xl p-6 max-w-2xl mx-auto">
-      <h3 class="text-xl font-bold text-amber-200 mb-4 flex items-center gap-2">
-        <span class="text-2xl">🔍</span>
-        Aucune batterie Marstek détectée
-      </h3>
+    <div class="w-full max-w-2xl mx-auto">
+      <div class="bg-amber-900/50 border border-amber-500 rounded-xl p-6">
+        <h3 class="text-xl font-bold text-amber-200 mb-4 flex items-center gap-2">
+          <span class="text-2xl">🔍</span>
+          Aucune batterie Marstek détectée
+        </h3>
 
-      <div class="text-amber-100 space-y-3">
-        <p class="font-medium">Pour que la détection fonctionne :</p>
-        <ul class="list-disc list-inside space-y-2 text-amber-200/80">
-          <li>La batterie Marstek doit être <strong class="text-amber-100">allumée et connectée au réseau</strong> (WiFi ou câble Ethernet)</li>
-          <li>Votre ordinateur doit être sur le <strong class="text-amber-100">même réseau local</strong> que la batterie</li>
-          <li>Le port UDP <strong class="text-amber-100">30000</strong> ne doit pas être bloqué par un pare-feu</li>
-          <li>Modèles compatibles : <strong class="text-amber-100">VenusE, Venus series</strong></li>
-        </ul>
-      </div>
+        <div class="text-amber-100 text-sm">
+          <p class="font-medium mb-2">Pour que la détection fonctionne :</p>
+          <ul class="list-disc list-inside space-y-1 text-amber-200/80">
+            <li>Batterie <strong class="text-amber-100">allumée et connectée</strong> au même réseau local</li>
+            <li><strong class="text-amber-100">API locale activée</strong> via l'appli mobile Marstek</li>
+          </ul>
+        </div>
 
-      <div class="mt-6 pt-4 border-t border-amber-500/30">
-        <p class="text-amber-200 text-sm mb-3">Ou entrez l'adresse IP manuellement :</p>
-        <div class="flex gap-2">
-          <input
-            type="text"
-            placeholder="192.168.1.xxx"
-            bind:value={manualIp}
-            disabled={connecting}
-            onkeydown={(e) => e.key === 'Enter' && connectManual()}
-            class="flex-1 px-4 py-2 bg-slate-800 border border-amber-500/50 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-amber-400 disabled:opacity-50"
-          />
-          <input
-            type="text"
-            placeholder="30000"
-            bind:value={manualPort}
-            disabled={connecting}
-            onkeydown={(e) => e.key === 'Enter' && connectManual()}
-            class="w-24 px-4 py-2 bg-slate-800 border border-amber-500/50 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-amber-400 text-center disabled:opacity-50"
-          />
+        <div class="mt-4 flex justify-center">
           <button
-            onclick={connectManual}
-            disabled={connecting || !manualIp.trim()}
-            class="px-6 py-2 bg-amber-600 hover:bg-amber-500 disabled:bg-amber-800 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors min-w-[120px]"
+            onclick={retryDiscovery}
+            class="px-6 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-medium rounded-lg transition-colors"
           >
-            {connecting ? 'Connexion...' : 'Connecter'}
+            Réessayer
           </button>
         </div>
-        <p class="text-amber-200/50 text-xs mt-2">Port par défaut : 30000</p>
+
+        <div class="mt-4 pt-4 border-t border-amber-500/30">
+          <p class="text-slate-400 text-sm mb-3">Ou entrez l'adresse IP manuellement :</p>
+          {@render manualIpForm()}
+        </div>
       </div>
     </div>
 
