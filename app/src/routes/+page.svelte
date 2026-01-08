@@ -1,12 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { load } from '@tauri-apps/plugin-store';
+  import type { Store } from '@tauri-apps/plugin-store';
 
-  const isTauri = () => '__TAURI_INTERNALS__' in window;
-
-  // TEST MODE: mettre à true pour simuler différents scénarios
-  const TEST_NO_DEVICE = false;      // Simule aucun device trouvé
-  const TEST_CONNECTION_ERROR = false; // Simule erreur de connexion après discovery
+  const isTauriEnv = '__TAURI_INTERNALS__' in window;
+  let store: Store | null = null;
 
   interface DiscoveredDevice {
     ip: string;
@@ -64,16 +63,22 @@
     };
   }
 
-  let data: DashboardData | null = $state(null);
-  let error: string | null = $state(null);
+  let data = $state<DashboardData | null>(null);
+  let error = $state<string | null>(null);
   let loading = $state(true);
   let interval: ReturnType<typeof setInterval>;
 
   // Derived values
-  let soc = $derived((data as DashboardData | null)?.battery?.soc ?? (data as DashboardData | null)?.energy?.bat_soc ?? 0);
-  let isCharging = $derived(((data as DashboardData | null)?.energy?.ongrid_power ?? 0) < 0);
-  let isDischarging = $derived(((data as DashboardData | null)?.energy?.ongrid_power ?? 0) > 0);
-  let socColor = $derived(isCharging ? 'bg-blue-500' : isDischarging ? 'bg-red-500' : (soc < 20 ? 'bg-red-500' : soc < 50 ? 'bg-yellow-500' : 'bg-green-500'));
+  let soc = $derived(data?.battery?.soc ?? data?.energy?.bat_soc ?? 0);
+  let ongridPower = $derived(data?.energy?.ongrid_power ?? 0);
+  let isCharging = $derived(ongridPower < 0);
+  let isDischarging = $derived(ongridPower > 0);
+  let socColor = $derived(
+    isCharging ? 'bg-blue-500' :
+    isDischarging ? 'bg-red-500' :
+    soc < 20 ? 'bg-red-500' :
+    soc < 50 ? 'bg-yellow-500' : 'bg-green-500'
+  );
 
   // Auto-discovery states
   let discovering = $state(true);
@@ -81,16 +86,11 @@
   let discoveryError = $state<string | null>(null);
   let manualIp = $state('');
   let manualPort = $state('30000');
-  let foundDevice: DiscoveredDevice | null = $state(null);
   let allDevices: DiscoveredDevice[] = $state([]);
   let showDeviceSelector = $state(false);
   let connecting = $state(false);
   let fetching = $state(false);
-  let lastResponseTime = $state(0);
   let currentInterval = $state(3000);
-
-  // Mode change states
-  let changingMode = $state(false);
 
   // Planning / Scheduler states
   let timeSlots = $state<TimeSlot[]>([
@@ -107,29 +107,55 @@
   let dragTooltip = $state<{ hour: number; x: number; y: number } | null>(null);
   let rubanElement = $state<HTMLDivElement | null>(null);
 
-  // Storage keys
-  const STORAGE_KEY_SLOTS = 'marstip_time_slots';
-  const STORAGE_KEY_SCHEDULER = 'marstip_scheduler_enabled';
+  // Tab navigation
+  let activeTab = $state<'dashboard' | 'infos'>('dashboard');
 
-  function loadSavedConfigs() {
+  // Visibility state (pause polling when minimized)
+  let isVisible = $state(true);
+
+  // Storage keys
+  const STORAGE_KEY_SLOTS = 'time_slots';
+  const STORAGE_KEY_SCHEDULER = 'scheduler_enabled';
+
+  async function loadSavedConfigs() {
     try {
-      const savedSlots = localStorage.getItem(STORAGE_KEY_SLOTS);
-      if (savedSlots) {
-        timeSlots = JSON.parse(savedSlots);
-      }
-      const savedScheduler = localStorage.getItem(STORAGE_KEY_SCHEDULER);
-      if (savedScheduler) {
-        schedulerEnabled = JSON.parse(savedScheduler);
+      if (isTauriEnv) {
+        store = await load('settings.json');
+        const savedSlots = await store.get<TimeSlot[]>(STORAGE_KEY_SLOTS);
+        if (savedSlots) {
+          timeSlots = savedSlots;
+        }
+        const savedScheduler = await store.get<boolean>(STORAGE_KEY_SCHEDULER);
+        if (savedScheduler !== null && savedScheduler !== undefined) {
+          schedulerEnabled = savedScheduler;
+        }
+      } else {
+        // Fallback localStorage pour dev web
+        const savedSlots = localStorage.getItem(STORAGE_KEY_SLOTS);
+        if (savedSlots) {
+          timeSlots = JSON.parse(savedSlots);
+        }
+        const savedScheduler = localStorage.getItem(STORAGE_KEY_SCHEDULER);
+        if (savedScheduler) {
+          schedulerEnabled = JSON.parse(savedScheduler);
+        }
       }
     } catch (e) {
       console.error('Error loading saved configs:', e);
     }
   }
 
-  function saveTimeSlots() {
+  async function saveTimeSlots() {
     try {
-      localStorage.setItem(STORAGE_KEY_SLOTS, JSON.stringify(timeSlots));
-      localStorage.setItem(STORAGE_KEY_SCHEDULER, JSON.stringify(schedulerEnabled));
+      if (isTauriEnv && store) {
+        await store.set(STORAGE_KEY_SLOTS, timeSlots);
+        await store.set(STORAGE_KEY_SCHEDULER, schedulerEnabled);
+        await store.save();
+      } else {
+        // Fallback localStorage pour dev web
+        localStorage.setItem(STORAGE_KEY_SLOTS, JSON.stringify(timeSlots));
+        localStorage.setItem(STORAGE_KEY_SCHEDULER, JSON.stringify(schedulerEnabled));
+      }
     } catch (e) {
       console.error('Error saving time slots:', e);
     }
@@ -137,14 +163,15 @@
 
   // --- Planning / Scheduler functions ---
 
+  const MODE_COLORS: Record<string, string> = {
+    Auto: 'bg-cyan-500',
+    AI: 'bg-purple-500',
+    Manual: 'bg-yellow-500',
+    Passive: 'bg-green-500'
+  };
+
   function getModeColor(mode: string): string {
-    switch (mode) {
-      case 'Auto': return 'bg-cyan-500';
-      case 'AI': return 'bg-purple-500';
-      case 'Manual': return 'bg-yellow-500';
-      case 'Passive': return 'bg-green-500';
-      default: return 'bg-slate-500';
-    }
+    return MODE_COLORS[mode] ?? 'bg-slate-500';
   }
 
   function formatHour(decimalHour: number): string {
@@ -349,48 +376,38 @@
   }
 
   async function fetchData() {
-    // TEST: simuler erreur de connexion
-    if (TEST_CONNECTION_ERROR) {
-      error = 'Timeout après 5000ms - Connexion perdue avec la batterie';
-      loading = false;
-      return;
-    }
+    // Ne pas rafraîchir si l'app est minimisée (sauf premier chargement)
+    if (!isVisible && data) return;
 
     // Éviter l'empilement des requêtes
     if (fetching) return;
 
     fetching = true;
     const startTime = performance.now();
+    let hasError = false;
 
     try {
-      if (isTauri()) {
+      if (isTauriEnv) {
         data = await invoke<DashboardData>('get_dashboard');
       } else {
         const res = await fetch('/api/dashboard');
         data = await res.json();
       }
       error = null;
-      lastResponseTime = Math.round(performance.now() - startTime);
-
-      // Ajuster l'intervalle si nécessaire
-      const newInterval = getOptimalInterval(lastResponseTime, false);
-      if (newInterval !== currentInterval) {
-        currentInterval = newInterval;
-        scheduleNextFetch();
-      }
     } catch (e) {
       error = String(e);
-      lastResponseTime = Math.round(performance.now() - startTime);
-
-      // Ralentir en cas d'erreur
-      const newInterval = getOptimalInterval(lastResponseTime, true);
-      if (newInterval !== currentInterval) {
-        currentInterval = newInterval;
-        scheduleNextFetch();
-      }
+      hasError = true;
     } finally {
       loading = false;
       fetching = false;
+
+      // Ajuster l'intervalle selon le temps de réponse
+      const responseTime = Math.round(performance.now() - startTime);
+      const newInterval = getOptimalInterval(responseTime, hasError);
+      if (newInterval !== currentInterval) {
+        currentInterval = newInterval;
+        scheduleNextFetch();
+      }
     }
   }
 
@@ -400,11 +417,10 @@
     showDeviceSelector = false;
 
     try {
-      if (isTauri()) {
+      if (isTauriEnv) {
         await invoke('set_device', { ip: device.ip, port: device.port });
       }
       deviceConfigured = true;
-      foundDevice = device;
       discoveryError = null;
       error = null;
       startDashboard();
@@ -437,22 +453,24 @@
     interval = setInterval(fetchData, currentInterval);
   }
 
-  onMount(async () => {
-    // Charger les configs sauvegardées
-    loadSavedConfigs();
+  function handleVisibilityChange() {
+    isVisible = document.visibilityState === 'visible';
+    // Rafraîchir immédiatement quand on restaure l'app
+    if (isVisible && deviceConfigured && !loading) {
+      fetchData();
+    }
+  }
 
-    if (isTauri()) {
+  onMount(async () => {
+    // Écouter les changements de visibilité (minimisation)
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // Charger les configs sauvegardées
+    await loadSavedConfigs();
+
+    if (isTauriEnv) {
       // Mode Tauri - auto-découverte
       discovering = true;
-
-      // TEST: simuler aucun device
-      if (TEST_NO_DEVICE) {
-        await new Promise(r => setTimeout(r, 2000)); // Simule délai discovery
-        discoveryError = 'no_device';
-        discovering = false;
-        return;
-      }
-
       try {
         const devices = await invoke<DiscoveredDevice[]>('discover_devices');
         allDevices = devices;
@@ -464,7 +482,6 @@
           const device = devices[0];
           await invoke('set_device', { ip: device.ip, port: device.port });
           deviceConfigured = true;
-          foundDevice = device;
           startDashboard();
         } else {
           // Plusieurs batteries: afficher le sélecteur
@@ -490,6 +507,7 @@
   onDestroy(() => {
     if (interval) clearInterval(interval);
     if (schedulerInterval) clearInterval(schedulerInterval);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
   });
 
   function formatPower(watts: number | undefined): string {
@@ -505,10 +523,8 @@
   }
 
   async function applyMode(mode: string, config?: object) {
-    changingMode = true;
-
     try {
-      if (isTauri()) {
+      if (isTauriEnv) {
         await invoke('set_mode', { mode, config });
       } else {
         const res = await fetch('/api/set-mode', {
@@ -524,45 +540,50 @@
       await fetchData();
     } catch (e) {
       console.error('Error applying mode:', e);
-    } finally {
-      changingMode = false;
     }
   }
 </script>
 
-<main class="min-h-screen bg-slate-900 p-6">
-  <header class="mb-8 flex justify-between items-start">
-    <div>
-      <h1 class="text-3xl font-bold text-white flex items-center gap-3">
-        <span class="text-4xl">⚡</span>
-        Marstek Dashboard
-        <span
-          class="w-2 h-2 rounded-full transition-all duration-150 {fetching ? 'bg-cyan-400 shadow-[0_0_8px_2px_rgba(34,211,238,0.6)]' : 'bg-slate-600'}"
-          title={fetching ? 'Requête en cours...' : 'En attente'}
-        ></span>
-      </h1>
-      {#if data}
-        <p class="text-slate-400 mt-1">
-          {data.device.device} v{data.device.ver} • Mis à jour: {data.timestamp}
-        </p>
-      {:else if foundDevice}
-        <p class="text-slate-400 mt-1">
-          {foundDevice.device ?? 'Marstek'} @ {foundDevice.ip}
-        </p>
+<main class="h-screen bg-slate-900 p-4 overflow-hidden flex flex-col">
+  <header class="mb-4 flex justify-between items-center">
+    <div class="flex items-center gap-2">
+      <span class="text-2xl">⚡</span>
+      <h1 class="text-xl font-bold text-white">MarsTip</h1>
+      <span
+        class="w-2 h-2 rounded-full transition-all duration-150 {fetching ? 'bg-cyan-400 shadow-[0_0_8px_2px_rgba(34,211,238,0.6)]' : 'bg-slate-600'}"
+        title={fetching ? 'Requête en cours...' : 'En attente'}
+      ></span>
+    </div>
+    <div class="flex items-center gap-2">
+      {#if deviceConfigured && !showDeviceSelector && data}
+        <!-- Onglets -->
+        <div class="flex bg-slate-800 rounded-lg p-0.5">
+          <button
+            onclick={() => activeTab = 'dashboard'}
+            class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'dashboard' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
+          >
+            Dashboard
+          </button>
+          <button
+            onclick={() => activeTab = 'infos'}
+            class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'infos' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
+          >
+            Infos
+          </button>
+        </div>
+        <!-- Bouton paramètres -->
+        <button
+          onclick={openDeviceSelector}
+          class="p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
+          title="Changer de batterie"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+        </button>
       {/if}
     </div>
-    {#if deviceConfigured && !showDeviceSelector}
-      <button
-        onclick={openDeviceSelector}
-        class="p-2 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
-        title="Changer de batterie"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-        </svg>
-      </button>
-    {/if}
   </header>
 
   {#if discovering}
@@ -716,239 +737,249 @@
     </div>
 
   {:else if data}
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+    <div class="flex-1 overflow-hidden">
+      {#if activeTab === 'dashboard'}
+        <!-- ONGLET DASHBOARD -->
+        <div class="space-y-3">
+          <!-- Batterie compacte -->
+          <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
+            <div class="flex items-center gap-4">
+              <div class="text-4xl font-bold text-white">{soc}%</div>
+              <div class="flex-1">
+                <div class="h-6 bg-slate-700 rounded-full overflow-hidden">
+                  <div
+                    class="h-full {socColor} transition-all duration-500 rounded-full"
+                    style="width: {soc}%"
+                  ></div>
+                </div>
+                <div class="flex justify-between mt-1 text-xs text-slate-400">
+                  <span>{formatEnergy(data.battery.bat_capacity)} / {formatEnergy(data.battery.rated_capacity)}</span>
+                  <span>{data.battery.bat_temp}°C</span>
+                </div>
+              </div>
+              <div class="text-right">
+                <div class="text-lg font-bold {isCharging ? 'text-blue-400' : isDischarging ? 'text-red-400' : 'text-slate-400'}">
+                  {isCharging ? '⚡' : isDischarging ? '⬆' : '⏸'} {formatPower(data.energy.ongrid_power)}
+                </div>
+                <div class="text-xs text-slate-500">{data.mode.mode ?? 'N/A'}</div>
+              </div>
+            </div>
+          </div>
 
-      <!-- Batterie -->
-      <div class="col-span-1 md:col-span-2 lg:col-span-2 bg-slate-800 rounded-xl p-6 border border-slate-700">
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-lg font-semibold text-slate-300 flex items-center gap-2">
-            <span class="text-2xl">🔋</span> Batterie
-          </h2>
-          <span class="text-slate-400 text-sm">{data.battery.bat_temp}°C</span>
-        </div>
+          <!-- Planning -->
+          <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
+            <div class="flex items-center justify-between mb-3">
+              <h2 class="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                <span>📅</span> Planning
+              </h2>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={schedulerEnabled}
+                  onchange={toggleScheduler}
+                  class="w-3 h-3 accent-cyan-500"
+                />
+                <span class="text-xs text-slate-400">Activer</span>
+              </label>
+            </div>
 
-        <div class="flex items-center gap-6">
-          <div class="text-5xl font-bold text-white">{soc}%</div>
+            <!-- Ruban 24h -->
+            <div class="relative">
+              <div class="flex justify-between text-[10px] text-slate-500 mb-1 px-0.5">
+                {#each [0, 6, 12, 18, 24] as h}
+                  <span>{h}h</span>
+                {/each}
+              </div>
 
-          <div class="flex-1">
-            <div class="h-8 bg-slate-700 rounded-full overflow-hidden">
               <div
-                class="h-full {socColor} transition-all duration-500 rounded-full"
-                style="width: {soc}%"
-              ></div>
-            </div>
-            <div class="flex justify-between mt-2 text-sm text-slate-400">
-              <span>{formatEnergy(data.battery.bat_capacity)}</span>
-              <span>{formatEnergy(data.battery.rated_capacity)}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Planning -->
-      <div class="col-span-1 md:col-span-2 lg:col-span-3 bg-slate-800 rounded-xl p-6 border border-slate-700">
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-lg font-semibold text-slate-300 flex items-center gap-2">
-            <span class="text-2xl">📅</span> Planning
-          </h2>
-          <div class="flex items-center gap-3">
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={schedulerEnabled}
-                onchange={toggleScheduler}
-                class="w-4 h-4 accent-cyan-500"
-              />
-              <span class="text-sm text-slate-400">Activer</span>
-            </label>
-          </div>
-        </div>
-
-        <!-- Ruban 24h -->
-        <div class="relative">
-          <!-- Graduations -->
-          <div class="flex justify-between text-xs text-slate-500 mb-1 px-0.5">
-            {#each [0, 3, 6, 9, 12, 15, 18, 21, 24] as h}
-              <span class="w-0 text-center" style="margin-left: {h === 0 ? '0' : '-0.5em'}">{h}h</span>
-            {/each}
-          </div>
-
-          <!-- Barre des plages -->
-          <div
-            bind:this={rubanElement}
-            class="relative h-12 bg-slate-700 rounded-lg overflow-hidden flex"
-          >
-            {#each timeSlots as slot, i}
-              <button
-                onclick={() => openSlotEditor(slot)}
-                class="h-full transition-colors hover:brightness-110 flex flex-col items-center justify-center {getModeColor(slot.mode)}"
-                style="width: {(slot.endHour - slot.startHour) / 24 * 100}%"
-                title="{formatHour(slot.startHour)} - {formatHour(slot.endHour)}: {slot.mode}"
+                bind:this={rubanElement}
+                class="relative h-10 bg-slate-700 rounded-lg overflow-hidden flex"
               >
-                {#if (slot.mode === 'Manual' || slot.mode === 'Passive') && slot.config?.isCharge !== undefined}
-                  <span class="text-xs font-medium text-white/90 truncate px-1">{slot.config.isCharge ? 'Charge' : 'Décharge'}</span>
-                  <span class="text-[10px] text-white/70 truncate px-1">{slot.config.power ?? 800}W</span>
-                {:else}
-                  <span class="text-xs font-medium text-white/90 truncate px-1">{slot.mode}</span>
-                {/if}
-              </button>
-              <!-- Poignée de frontière (sauf après le dernier) -->
-              {#if i < timeSlots.length - 1}
+                {#each timeSlots as slot, i}
+                  <button
+                    onclick={() => openSlotEditor(slot)}
+                    class="h-full transition-colors hover:brightness-110 flex flex-col items-center justify-center {getModeColor(slot.mode)}"
+                    style="width: {(slot.endHour - slot.startHour) / 24 * 100}%"
+                    title="{formatHour(slot.startHour)} - {formatHour(slot.endHour)}: {slot.mode}"
+                  >
+                    {#if (slot.mode === 'Manual' || slot.mode === 'Passive') && slot.config?.isCharge !== undefined}
+                      <span class="text-[10px] font-medium text-white/90 truncate px-1">{slot.config.isCharge ? 'Charge' : 'Décharge'}</span>
+                    {:else}
+                      <span class="text-[10px] font-medium text-white/90 truncate px-1">{slot.mode}</span>
+                    {/if}
+                  </button>
+                  {#if i < timeSlots.length - 1}
+                    <div
+                      class="absolute top-0 bottom-0 w-3 -ml-1.5 cursor-col-resize z-10 group"
+                      style="left: {slot.endHour / 24 * 100}%"
+                      onmousedown={(e) => startDrag(i, e)}
+                      role="slider"
+                      aria-label="Ajuster la frontière"
+                      aria-valuemin={0}
+                      aria-valuemax={24}
+                      aria-valuenow={slot.endHour}
+                      tabindex="0"
+                    >
+                      <div class="absolute left-1/2 top-0 bottom-0 w-0.5 bg-slate-900/50 group-hover:bg-white transition-all"></div>
+                    </div>
+                  {/if}
+                {/each}
+              </div>
+
+              {#if dragTooltip}
                 <div
-                  class="absolute top-0 bottom-0 w-3 -ml-1.5 cursor-col-resize z-10 group"
-                  style="left: {slot.endHour / 24 * 100}%"
-                  onmousedown={(e) => startDrag(i, e)}
-                  role="slider"
-                  aria-label="Ajuster la frontière à {formatHour(slot.endHour)}"
-                  aria-valuemin={0}
-                  aria-valuemax={24}
-                  aria-valuenow={slot.endHour}
-                  tabindex="0"
+                  class="fixed bg-slate-900 text-white text-xs px-2 py-1 rounded shadow-lg pointer-events-none z-50"
+                  style="left: {dragTooltip.x}px; top: {dragTooltip.y}px; transform: translateX(-50%)"
                 >
-                  <div class="absolute left-1/2 top-0 bottom-0 w-0.5 bg-slate-900/50 group-hover:bg-white group-hover:shadow-[0_0_6px_rgba(255,255,255,0.5)] transition-all"></div>
+                  {formatHour(dragTooltip.hour)}
                 </div>
               {/if}
-            {/each}
+
+              {#if true}
+                {@const now = new Date()}
+                {@const currentPos = (now.getHours() + now.getMinutes() / 60) / 24 * 100}
+                <div
+                  class="absolute top-5 bottom-0 w-0.5 bg-white/70 pointer-events-none"
+                  style="left: {currentPos}%"
+                >
+                  <div class="absolute -top-1 left-1/2 -translate-x-1/2 w-1.5 h-1.5 bg-white rounded-full"></div>
+                </div>
+              {/if}
+            </div>
+
+            <div class="mt-2 flex items-center justify-between text-[10px]">
+              <div class="flex gap-2">
+                <span class="flex items-center gap-1"><span class="w-2 h-2 rounded bg-cyan-500"></span> Auto</span>
+                <span class="flex items-center gap-1"><span class="w-2 h-2 rounded bg-purple-500"></span> AI</span>
+                <span class="flex items-center gap-1"><span class="w-2 h-2 rounded bg-yellow-500"></span> Manual</span>
+                <span class="flex items-center gap-1"><span class="w-2 h-2 rounded bg-green-500"></span> Passive</span>
+              </div>
+            </div>
           </div>
 
-          <!-- Tooltip pendant le drag -->
-          {#if dragTooltip}
-            <div
-              class="fixed bg-slate-900 text-white text-sm px-2 py-1 rounded shadow-lg pointer-events-none z-50"
-              style="left: {dragTooltip.x}px; top: {dragTooltip.y}px; transform: translateX(-50%)"
-            >
-              {formatHour(dragTooltip.hour)}
+          <!-- Compteur CT (si présent) -->
+          {#if data.meter.ct_state === 1}
+            <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
+              <h2 class="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
+                <span>📊</span> Conso maison
+              </h2>
+              <div class="flex items-center justify-between">
+                <div class="flex gap-4 text-xs">
+                  <span class="text-slate-400">A: <span class="text-white">{formatPower(data.meter.a_power)}</span></span>
+                  <span class="text-slate-400">B: <span class="text-white">{formatPower(data.meter.b_power)}</span></span>
+                  <span class="text-slate-400">C: <span class="text-white">{formatPower(data.meter.c_power)}</span></span>
+                </div>
+                <span class="text-cyan-400 font-bold">{formatPower(data.meter.total_power)}</span>
+              </div>
+            </div>
+          {/if}
+        </div>
+
+      {:else}
+        <!-- ONGLET INFOS -->
+        <div class="grid grid-cols-2 gap-3">
+          <!-- État -->
+          <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
+            <h2 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+              <span>⚙️</span> État
+            </h2>
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Mode</span>
+                <span class="text-white font-medium">{data.mode.mode ?? 'N/A'}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Statut</span>
+                <span class="{isCharging ? 'text-blue-400' : isDischarging ? 'text-red-400' : 'text-slate-400'} font-medium">
+                  {isCharging ? 'CHARGE' : isDischarging ? 'INJECTION' : 'VEILLE'}
+                </span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Puissance</span>
+                <span class="text-white font-medium">{formatPower(data.energy.ongrid_power)}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Statistiques -->
+          <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
+            <h2 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+              <span>📈</span> Statistiques
+            </h2>
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Injecté</span>
+                <span class="text-green-400 font-medium">{formatEnergy(data.energy.total_grid_output_energy)}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Consommé</span>
+                <span class="text-yellow-400 font-medium">{formatEnergy(data.energy.total_grid_input_energy)}</span>
+              </div>
+              {#if true}
+                {@const bilan = (data.energy.total_grid_output_energy ?? 0) - (data.energy.total_grid_input_energy ?? 0)}
+                <div class="flex justify-between border-t border-slate-600 pt-2">
+                  <span class="text-slate-300">Bilan</span>
+                  <span class="{bilan > 0 ? 'text-green-400' : 'text-yellow-400'} font-bold">
+                    {formatEnergy(bilan)}
+                  </span>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Compteur CT -->
+          {#if data.meter.ct_state === 1}
+            <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
+              <h2 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                <span>📊</span> Compteur CT
+              </h2>
+              <div class="space-y-2 text-sm">
+                <div class="flex justify-between">
+                  <span class="text-slate-400">Phase A</span>
+                  <span class="text-white font-medium">{formatPower(data.meter.a_power)}</span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400">Phase B</span>
+                  <span class="text-white font-medium">{formatPower(data.meter.b_power)}</span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400">Phase C</span>
+                  <span class="text-white font-medium">{formatPower(data.meter.c_power)}</span>
+                </div>
+                <div class="border-t border-slate-600 pt-2 flex justify-between">
+                  <span class="text-slate-300">Total</span>
+                  <span class="text-cyan-400 font-bold">{formatPower(data.meter.total_power)}</span>
+                </div>
+              </div>
             </div>
           {/if}
 
-          <!-- Indicateur heure actuelle -->
-          {#if true}
-            {@const now = new Date()}
-            {@const currentPos = (now.getHours() + now.getMinutes() / 60) / 24 * 100}
-            <div
-              class="absolute top-6 bottom-0 w-0.5 bg-white/70 pointer-events-none"
-              style="left: {currentPos}%"
-            >
-              <div class="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-white rounded-full"></div>
-            </div>
-          {/if}
-        </div>
-
-        <!-- Légende et actions -->
-        <div class="mt-3 flex items-center justify-between text-xs">
-          <div class="flex gap-3">
-            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-cyan-500"></span> Auto</span>
-            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-purple-500"></span> AI</span>
-            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-yellow-500"></span> Manual</span>
-            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-green-500"></span> Passive</span>
-          </div>
-          <span class="text-slate-500">Glisser les frontières pour ajuster</span>
-        </div>
-      </div>
-
-      <!-- État -->
-      <div class="bg-slate-800 rounded-xl p-6 border border-slate-700">
-        <h2 class="text-lg font-semibold text-slate-300 mb-4 flex items-center gap-2">
-          <span class="text-2xl">⚙️</span> État
-        </h2>
-
-        <div class="space-y-4">
-          <div>
-            <span class="text-slate-400 text-sm">Mode</span>
-            <div class="text-lg font-medium text-white">{data.mode.mode ?? 'N/A'}</div>
-          </div>
-
-          <div>
-            <span class="text-slate-400 text-sm">Statut</span>
-            <div class="text-xl font-bold {isCharging ? 'text-blue-400' : isDischarging ? 'text-red-400' : 'text-slate-400'}">
-              {isCharging ? '⚡ CHARGE' : isDischarging ? '⬆ INJECTION' : '⏸ VEILLE'}
-            </div>
-          </div>
-
-          <div>
-            <span class="text-slate-400 text-sm">Puissance Grid</span>
-            <div class="text-2xl font-bold text-white">{formatPower(data.energy.ongrid_power)}</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Compteur CT -->
-      {#if data.meter.ct_state === 1}
-        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700">
-          <h2 class="text-lg font-semibold text-slate-300 mb-4 flex items-center gap-2">
-            <span class="text-2xl">📊</span> Compteur CT
-          </h2>
-
-          <div class="space-y-3">
-            <div class="flex justify-between">
-              <span class="text-slate-400">Phase A</span>
-              <span class="text-white font-medium">{formatPower(data.meter.a_power)}</span>
-            </div>
-            <div class="flex justify-between">
-              <span class="text-slate-400">Phase B</span>
-              <span class="text-white font-medium">{formatPower(data.meter.b_power)}</span>
-            </div>
-            <div class="flex justify-between">
-              <span class="text-slate-400">Phase C</span>
-              <span class="text-white font-medium">{formatPower(data.meter.c_power)}</span>
-            </div>
-            <div class="border-t border-slate-600 pt-3 flex justify-between">
-              <span class="text-slate-300 font-medium">Total maison</span>
-              <span class="text-cyan-400 font-bold">{formatPower(data.meter.total_power)}</span>
+          <!-- Connexion -->
+          <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
+            <h2 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+              <span>📡</span> Connexion
+            </h2>
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between">
+                <span class="text-slate-400">WiFi</span>
+                <span class="text-white font-medium">{data.wifi.ssid}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Signal</span>
+                <span class="text-white font-medium">{data.wifi.rssi} dBm</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">IP</span>
+                <span class="text-white font-medium">{data.device.ip}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Appareil</span>
+                <span class="text-white font-medium">{data.device.device} v{data.device.ver}</span>
+              </div>
             </div>
           </div>
         </div>
       {/if}
-
-      <!-- Statistiques -->
-      <div class="bg-slate-800 rounded-xl p-6 border border-slate-700">
-        <h2 class="text-lg font-semibold text-slate-300 mb-4 flex items-center gap-2">
-          <span class="text-2xl">📈</span> Statistiques
-        </h2>
-
-        <div class="space-y-3">
-          <div class="flex justify-between">
-            <span class="text-slate-400">Énergie injectée</span>
-            <span class="text-green-400 font-medium">{formatEnergy(data.energy.total_grid_output_energy)}</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">Énergie consommée</span>
-            <span class="text-yellow-400 font-medium">{formatEnergy(data.energy.total_grid_input_energy)}</span>
-          </div>
-          {#if true}
-            {@const bilan = (data.energy.total_grid_output_energy ?? 0) - (data.energy.total_grid_input_energy ?? 0)}
-            <div class="border-t border-slate-600 pt-3 flex justify-between">
-              <span class="text-slate-300 font-medium">Bilan</span>
-              <span class="{bilan > 0 ? 'text-green-400' : 'text-yellow-400'} font-bold">
-                {formatEnergy(bilan)}
-              </span>
-            </div>
-          {/if}
-        </div>
-      </div>
-
-      <!-- Connexion -->
-      <div class="bg-slate-800 rounded-xl p-6 border border-slate-700">
-        <h2 class="text-lg font-semibold text-slate-300 mb-4 flex items-center gap-2">
-          <span class="text-2xl">📡</span> Connexion
-        </h2>
-
-        <div class="space-y-3">
-          <div class="flex justify-between">
-            <span class="text-slate-400">WiFi</span>
-            <span class="text-white font-medium">{data.wifi.ssid}</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">Signal</span>
-            <span class="text-white font-medium">{data.wifi.rssi} dBm</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">IP</span>
-            <span class="text-white font-medium">{data.device.ip}</span>
-          </div>
-        </div>
-      </div>
-
     </div>
   {/if}
 

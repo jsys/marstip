@@ -306,6 +306,7 @@ fn get_dashboard(state: State<AppState>) -> Result<DashboardData, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
         .manage(AppState {
             device: Mutex::new(DeviceConfig {
                 ip: None,
