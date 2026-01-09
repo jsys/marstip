@@ -3,6 +3,8 @@ name: Build
 on:
   push:
     branches: [master]
+    tags:
+      - 'v*'
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -60,6 +62,11 @@ jobs:
         with:
           projectPath: app
           args: ${{ matrix.args }}
+          tagName: ${{ github.ref_name }}
+          releaseName: 'MarsTip ${{ github.ref_name }}'
+          releaseBody: 'See the assets below to download for your platform.'
+          releaseDraft: false
+          prerelease: false
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

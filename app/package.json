@@ -1,6 +1,6 @@
 {
   "name": "marstip",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "MarsTip - Marstek Battery Dashboard",
   "type": "module",
   "scripts": {
