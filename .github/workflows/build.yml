@@ -1,11 +1,7 @@
-name: Build
+name: Build & Release
 
 on:
   push:
-    branches: [master]
-    tags:
-      - 'v*'
-  pull_request:
     branches: [master]
   workflow_dispatch:
 
@@ -13,7 +9,77 @@ permissions:
   contents: write
 
 jobs:
+  version-and-release:
+    runs-on: ubuntu-latest
+    # Ignorer les commits du bot pour éviter boucle infinie
+    if: "!contains(github.event.head_commit.author.name, 'github-actions')"
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine version bump
+        id: bump
+        run: |
+          # Lire version actuelle
+          VERSION=$(jq -r '.version' app/src-tauri/tauri.conf.json)
+          IFS='.' read -r major minor patch <<< "$VERSION"
+
+          # Analyser les commits depuis le dernier tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            COMMITS=$(git log $LAST_TAG..HEAD --pretty=format:"%s")
+          else
+            COMMITS=$(git log --pretty=format:"%s")
+          fi
+
+          # Déterminer le type de bump
+          BUMP="patch"
+          if echo "$COMMITS" | grep -qE "^feat(\(.+\))?!:|BREAKING CHANGE:"; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qE "^feat(\(.+\))?:"; then
+            BUMP="minor"
+          fi
+
+          # Calculer nouvelle version
+          case $BUMP in
+            major) NEW_VERSION="$((major + 1)).0.0" ;;
+            minor) NEW_VERSION="$major.$((minor + 1)).0" ;;
+            patch) NEW_VERSION="$major.$minor.$((patch + 1))" ;;
+          esac
+
+          echo "Current: $VERSION → New: $NEW_VERSION ($BUMP)"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+
+      - name: Update version files
+        run: |
+          VERSION=${{ steps.bump.outputs.version }}
+
+          # tauri.conf.json
+          jq ".version = \"$VERSION\"" app/src-tauri/tauri.conf.json > tmp.json && mv tmp.json app/src-tauri/tauri.conf.json
+
+          # Cargo.toml (ligne version = "...")
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' app/src-tauri/Cargo.toml
+
+          # package.json
+          jq ".version = \"$VERSION\"" app/package.json > tmp.json && mv tmp.json app/package.json
+
+      - name: Commit, Tag & Push
+        run: |
+          VERSION=${{ steps.bump.outputs.version }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: bump version to $VERSION [skip ci]"
+          git tag "v$VERSION"
+          git push origin master --tags
+
   build:
+    needs: version-and-release
     strategy:
       fail-fast: false
       matrix:
@@ -35,16 +101,15 @@ jobs:
     name: Build (${{ matrix.name }})
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: master
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
@@ -65,8 +130,8 @@ jobs:
         with:
           projectPath: app
           args: ${{ matrix.args }}
-          tagName: ${{ github.ref_name }}
-          releaseName: 'MarsTip ${{ github.ref_name }}'
+          tagName: v${{ needs.version-and-release.outputs.version }}
+          releaseName: 'MarsTip v${{ needs.version-and-release.outputs.version }}'
           releaseBody: 'See the assets below to download for your platform.'
           releaseDraft: false
           prerelease: false
