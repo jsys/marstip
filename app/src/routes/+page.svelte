@@ -63,6 +63,12 @@
     };
   }
 
+  interface LogEntry {
+    timestamp: string;
+    type: 'mode_change' | 'error';
+    message: string;
+  }
+
   let data = $state<DashboardData | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(true);
@@ -79,6 +85,9 @@
     soc < 20 ? 'bg-red-500' :
     soc < 50 ? 'bg-yellow-500' : 'bg-green-500'
   );
+  let energyBilan = $derived((data?.energy?.total_grid_output_energy ?? 0) - (data?.energy?.total_grid_input_energy ?? 0));
+  let slotNeedsConfig = $derived(editingSlot?.mode === 'Manual' || editingSlot?.mode === 'Passive');
+  let canSaveSlot = $derived(!slotNeedsConfig || editingSlot?.config?.isCharge !== undefined);
 
   // Auto-discovery states
   let discovering = $state(true);
@@ -99,7 +108,8 @@
   let schedulerEnabled = $state(false);
   let editingSlot = $state<TimeSlot | null>(null);
   let showSlotModal = $state(false);
-  let currentScheduledSlotId = $state<string | null>(null);
+  let currentScheduledSlotId = $state<string | null>(null);  // Plage confirmée
+  let pendingSchedulerSlotId = $state<string | null>(null);  // Plage en cours de tentative
   let schedulerInterval: ReturnType<typeof setInterval>;
 
   // Drag & drop states
@@ -108,7 +118,10 @@
   let rubanElement = $state<HTMLDivElement | null>(null);
 
   // Tab navigation
-  let activeTab = $state<'dashboard' | 'infos'>('dashboard');
+  let activeTab = $state<'dashboard' | 'infos' | 'logs'>('dashboard');
+
+  // Logs (session only - not reloaded from file)
+  let logs = $state<LogEntry[]>([]);
 
   // Visibility state (pause polling when minimized)
   let isVisible = $state(true);
@@ -117,33 +130,32 @@
   let tempErrorCount = $state(0);
   let tempErrorSince = $state<number | null>(null);
 
-  // Storage keys
-  const STORAGE_KEY_SLOTS = 'time_slots';
-  const STORAGE_KEY_SCHEDULER = 'scheduler_enabled';
+  // Storage abstraction
+  async function storageGet<T>(key: string): Promise<T | null> {
+    if (isTauriEnv) {
+      if (!store) store = await load('settings.json');
+      return await store.get<T>(key) ?? null;
+    }
+    const val = localStorage.getItem(key);
+    return val ? JSON.parse(val) : null;
+  }
+
+  async function storageSet(key: string, value: unknown): Promise<void> {
+    if (isTauriEnv) {
+      if (!store) store = await load('settings.json');
+      await store.set(key, value);
+      await store.save();
+    } else {
+      localStorage.setItem(key, JSON.stringify(value));
+    }
+  }
 
   async function loadSavedConfigs() {
     try {
-      if (isTauriEnv) {
-        store = await load('settings.json');
-        const savedSlots = await store.get<TimeSlot[]>(STORAGE_KEY_SLOTS);
-        if (savedSlots) {
-          timeSlots = savedSlots;
-        }
-        const savedScheduler = await store.get<boolean>(STORAGE_KEY_SCHEDULER);
-        if (savedScheduler !== null && savedScheduler !== undefined) {
-          schedulerEnabled = savedScheduler;
-        }
-      } else {
-        // Fallback localStorage pour dev web
-        const savedSlots = localStorage.getItem(STORAGE_KEY_SLOTS);
-        if (savedSlots) {
-          timeSlots = JSON.parse(savedSlots);
-        }
-        const savedScheduler = localStorage.getItem(STORAGE_KEY_SCHEDULER);
-        if (savedScheduler) {
-          schedulerEnabled = JSON.parse(savedScheduler);
-        }
-      }
+      const savedSlots = await storageGet<TimeSlot[]>('time_slots');
+      if (savedSlots) timeSlots = savedSlots;
+      const savedScheduler = await storageGet<boolean>('scheduler_enabled');
+      if (savedScheduler !== null) schedulerEnabled = savedScheduler;
     } catch (e) {
       console.error('Error loading saved configs:', e);
     }
@@ -151,17 +163,34 @@
 
   async function saveTimeSlots() {
     try {
-      if (isTauriEnv && store) {
-        await store.set(STORAGE_KEY_SLOTS, timeSlots);
-        await store.set(STORAGE_KEY_SCHEDULER, schedulerEnabled);
-        await store.save();
-      } else {
-        // Fallback localStorage pour dev web
-        localStorage.setItem(STORAGE_KEY_SLOTS, JSON.stringify(timeSlots));
-        localStorage.setItem(STORAGE_KEY_SCHEDULER, JSON.stringify(schedulerEnabled));
-      }
+      await storageSet('time_slots', timeSlots);
+      await storageSet('scheduler_enabled', schedulerEnabled);
     } catch (e) {
       console.error('Error saving time slots:', e);
+    }
+  }
+
+  // --- Logging functions ---
+
+  function formatLogTimestamp(): string {
+    return new Date().toLocaleString('fr-FR', {
+      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+  }
+
+  async function addLog(type: 'mode_change' | 'error', message: string) {
+    const entry: LogEntry = { timestamp: formatLogTimestamp(), type, message };
+    logs = [...logs, entry];
+
+    // Sauvegarder dans fichier
+    if (isTauriEnv) {
+      try {
+        const { writeTextFile, BaseDirectory } = await import('@tauri-apps/plugin-fs');
+        const line = `[${entry.timestamp}] [${entry.type.toUpperCase()}] ${entry.message}\n`;
+        await writeTextFile('marstip.log', line, { baseDir: BaseDirectory.AppData, append: true });
+      } catch (e) {
+        console.error('Error writing log to file:', e);
+      }
     }
   }
 
@@ -176,6 +205,16 @@
 
   function getModeColor(mode: string): string {
     return MODE_COLORS[mode] ?? 'bg-slate-500';
+  }
+
+  function getSignedPower(config: TimeSlot['config']): number {
+    const power = config?.power ?? 800;
+    return config?.isCharge ? -Math.abs(power) : Math.abs(power);
+  }
+
+  function closeSlotModal() {
+    showSlotModal = false;
+    editingSlot = null;
   }
 
   function formatHour(decimalHour: number): string {
@@ -196,8 +235,7 @@
       timeSlots[idx] = editingSlot;
       timeSlots = [...timeSlots]; // Trigger reactivity
     }
-    showSlotModal = false;
-    editingSlot = null;
+    closeSlotModal();
     saveTimeSlots();
   }
 
@@ -225,8 +263,7 @@
       timeSlots[0] = { ...timeSlots[0], startHour: 0, endHour: 24 };
     }
 
-    showSlotModal = false;
-    editingSlot = null;
+    closeSlotModal();
     saveTimeSlots();
   }
 
@@ -252,10 +289,7 @@
     // Insérer après
     timeSlots = [...timeSlots.slice(0, idx + 1), newSlot, ...timeSlots.slice(idx + 1)];
     saveTimeSlots();
-
-    // Fermer la popup
-    showSlotModal = false;
-    editingSlot = null;
+    closeSlotModal();
   }
 
   function toggleScheduler() {
@@ -278,24 +312,36 @@
     const slot = getCurrentSlot();
     if (!slot) return;
 
-    // Si on a déjà appliqué cette plage, ne rien faire
-    if (currentScheduledSlotId === slot.id) return;
-
-    // Vérifier si le mode actuel correspond
+    // Mode incorrect → tenter de l'appliquer
     if (data?.mode?.mode !== slot.mode) {
-      currentScheduledSlotId = slot.id;
+      const isFirstAttempt = pendingSchedulerSlotId !== slot.id;
+      const hasConfig = (slot.mode === 'Manual' || slot.mode === 'Passive') && slot.config;
+      const power = hasConfig ? getSignedPower(slot.config) : 0;
+
       // Appliquer le mode avec sa config si présente
       if (slot.mode === 'Manual' && slot.config) {
-        const power = slot.config.isCharge ? -Math.abs(slot.config.power ?? 800) : Math.abs(slot.config.power ?? 800);
         applyMode('Manual', { manual_cfg: { time_num: 0, start_time: formatHour(slot.startHour), end_time: formatHour(slot.endHour), week_set: 127, power, enable: 1 } });
       } else if (slot.mode === 'Passive' && slot.config) {
-        const power = slot.config.isCharge ? -Math.abs(slot.config.power ?? 800) : Math.abs(slot.config.power ?? 800);
         applyMode('Passive', { passive_cfg: { power, cd_time: slot.config.cd_time ?? 300 } });
       } else {
         applyMode(slot.mode);
       }
-    } else {
-      // Mode déjà correct, juste marquer comme appliqué
+
+      // Log consolidé
+      if (isFirstAttempt) {
+        const detail = hasConfig ? ` (${slot.config!.isCharge ? 'charge' : 'décharge'} ${Math.abs(power)}W)` : '';
+        addLog('mode_change', `Scheduler: passage en mode ${slot.mode}${detail}`);
+      }
+
+      pendingSchedulerSlotId = slot.id;
+      currentScheduledSlotId = null;
+    }
+    // Mode correct → vérifier si c'était une tentative en cours
+    else {
+      if (pendingSchedulerSlotId === slot.id) {
+        addLog('mode_change', `Scheduler: mode ${slot.mode} confirmé`);
+        pendingSchedulerSlotId = null;
+      }
       currentScheduledSlotId = slot.id;
     }
   }
@@ -399,6 +445,9 @@
       }
       error = null;
       // Reset temp error on success
+      if (tempErrorSince) {
+        addLog('mode_change', `Connexion rétablie après ${tempErrorCount} échec(s)`);
+      }
       tempErrorCount = 0;
       tempErrorSince = null;
     } catch (e) {
@@ -406,7 +455,10 @@
       // Erreur temporaire : ne pas afficher l'écran d'erreur, juste tracker
       if (errStr.includes('os error 35') || errStr.includes('Resource temporarily unavailable')) {
         tempErrorCount++;
-        if (!tempErrorSince) tempErrorSince = Date.now();
+        if (!tempErrorSince) {
+          tempErrorSince = Date.now();
+          addLog('error', 'Erreur réseau temporaire (os error 35)');
+        }
         hasError = true;
         // Ne pas mettre error, garder les données précédentes
       } else {
@@ -415,6 +467,7 @@
         // Reset temp error pour une vraie erreur
         tempErrorCount = 0;
         tempErrorSince = null;
+        addLog('error', `Erreur réseau: ${errStr}`);
       }
     } finally {
       loading = false;
@@ -513,6 +566,9 @@
     // Charger les configs sauvegardées
     await loadSavedConfigs();
 
+    // Log de démarrage
+    addLog('mode_change', 'Démarrage de MarsTip');
+
     if (isTauriEnv) {
       // Mode Tauri - auto-découverte
       discovering = true;
@@ -585,6 +641,7 @@
       await fetchData();
     } catch (e) {
       console.error('Error applying mode:', e);
+      addLog('error', `Erreur changement mode ${mode}: ${e}`);
     }
   }
 </script>
@@ -646,6 +703,12 @@
             class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'infos' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
           >
             Infos
+          </button>
+          <button
+            onclick={() => activeTab = 'logs'}
+            class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'logs' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
+          >
+            Logs
           </button>
         </div>
         <!-- Bouton paramètres -->
@@ -911,7 +974,7 @@
           {/if}
         </div>
 
-      {:else}
+      {:else if activeTab === 'infos'}
         <!-- ONGLET INFOS -->
         <div class="grid grid-cols-2 gap-3">
           <!-- État -->
@@ -951,15 +1014,12 @@
                 <span class="text-slate-400">Consommé</span>
                 <span class="text-yellow-400 font-medium">{formatEnergy(data.energy.total_grid_input_energy)}</span>
               </div>
-              {#if true}
-                {@const bilan = (data.energy.total_grid_output_energy ?? 0) - (data.energy.total_grid_input_energy ?? 0)}
-                <div class="flex justify-between border-t border-slate-600 pt-2">
-                  <span class="text-slate-300">Bilan</span>
-                  <span class="{bilan > 0 ? 'text-green-400' : 'text-yellow-400'} font-bold">
-                    {formatEnergy(bilan)}
-                  </span>
-                </div>
-              {/if}
+              <div class="flex justify-between border-t border-slate-600 pt-2">
+                <span class="text-slate-300">Bilan</span>
+                <span class="{energyBilan > 0 ? 'text-green-400' : 'text-yellow-400'} font-bold">
+                  {formatEnergy(energyBilan)}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -1013,6 +1073,46 @@
                 <span class="text-white font-medium">{data.device.device} v{data.device.ver}</span>
               </div>
             </div>
+          </div>
+        </div>
+
+      {:else if activeTab === 'logs'}
+        <!-- ONGLET LOGS -->
+        <div class="flex flex-col h-full">
+          <div class="flex justify-between items-center mb-2">
+            <h2 class="text-lg font-bold text-white flex items-center gap-2">
+              <span>📋</span> Logs de session
+            </h2>
+            <div class="flex gap-2">
+              <button
+                onclick={() => {
+                  const text = logs.map(l => `[${l.timestamp}] [${l.type.toUpperCase()}] ${l.message}`).join('\n');
+                  navigator.clipboard.writeText(text);
+                }}
+                class="text-xs text-slate-400 hover:text-white transition-colors"
+                title="Copier dans le presse-papier"
+              >
+                Copier
+              </button>
+              <button
+                onclick={() => logs = []}
+                class="text-xs text-slate-400 hover:text-white transition-colors"
+              >
+                Effacer
+              </button>
+            </div>
+          </div>
+          <div class="flex-1 bg-slate-800 rounded-lg p-3 overflow-y-auto font-mono text-xs border border-slate-700">
+            {#if logs.length === 0}
+              <p class="text-slate-500 italic">Aucun log cette session</p>
+            {:else}
+              {#each logs as log}
+                <div class="py-0.5 {log.type === 'error' ? 'text-red-400' : 'text-cyan-400'}">
+                  <span class="text-slate-500">{log.timestamp}</span>
+                  <span class="ml-2">{log.message}</span>
+                </div>
+              {/each}
+            {/if}
           </div>
         </div>
       {/if}
@@ -1172,24 +1272,19 @@
           </button>
           <div class="flex-1"></div>
           <button
-            onclick={() => { showSlotModal = false; editingSlot = null; }}
+            onclick={closeSlotModal}
             class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors"
           >
             Annuler
           </button>
-          {#if true}
-            {@const needsConfig = editingSlot?.mode === 'Manual' || editingSlot?.mode === 'Passive'}
-            {@const hasDirection = editingSlot?.config?.isCharge !== undefined}
-            {@const canSave = !needsConfig || hasDirection}
-            <button
-              onclick={saveSlot}
-              disabled={!canSave}
-              class="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
-              title={!canSave ? 'Choisir Charge ou Décharge' : ''}
-            >
-              Sauvegarder
-            </button>
-          {/if}
+          <button
+            onclick={saveSlot}
+            disabled={!canSaveSlot}
+            class="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+            title={!canSaveSlot ? 'Choisir Charge ou Décharge' : ''}
+          >
+            Sauvegarder
+          </button>
         </div>
       </div>
     </div>

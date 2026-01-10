@@ -307,6 +307,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_fs::init())
         .manage(AppState {
             device: Mutex::new(DeviceConfig {
                 ip: None,
