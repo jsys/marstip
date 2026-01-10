@@ -76,7 +76,7 @@ jobs:
           git add -A
           git commit -m "chore: bump version to $VERSION [skip ci]"
           git tag "v$VERSION"
-          git push origin master --tags
+          git push origin HEAD:refs/heads/master --tags
 
   build:
     needs: version-and-release
