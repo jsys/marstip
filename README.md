@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <img src="app/MarsTip.gif" alt="MarsTip Demo" width="600">
+</p>
+
+<p align="center">
   <a href="#english">English</a> •
   <a href="#français">Français</a> •
   <a href="#download">Download</a>
@@ -27,7 +31,11 @@ MarsTip is a cross-platform desktop application for monitoring Marstek home batt
 - **Auto-discovery** - Automatically detects Marstek batteries on your local network
 - **Real-time monitoring** - Battery status, charge level, power flow, temperature
 - **Energy statistics** - Solar production, grid import/export, total consumption
+- **24h Scheduling** - Visual timeline with drag-and-drop to schedule operating modes (Auto, AI, Manual, Passive)
 - **Multi-battery support** - Select and switch between multiple batteries
+- **CT Meter support** - Three-phase power monitoring (if available)
+- **Event logging** - Session logs for mode changes and errors
+- **Bilingual** - Full English and French interface
 - **Adaptive polling** - Automatically adjusts refresh rate based on response time
 - **Offline** - Works entirely on your local network, no internet required
 
@@ -57,7 +65,11 @@ MarsTip est une application desktop multi-plateforme pour surveiller les batteri
 - **Auto-détection** - Détecte automatiquement les batteries Marstek sur votre réseau local
 - **Monitoring temps réel** - État de la batterie, niveau de charge, flux d'énergie, température
 - **Statistiques énergie** - Production solaire, import/export réseau, consommation totale
+- **Planification 24h** - Timeline visuelle avec glisser-déposer pour programmer les modes (Auto, AI, Manuel, Passif)
 - **Multi-batteries** - Sélectionnez et basculez entre plusieurs batteries
+- **Support CT Meter** - Monitoring triphasé (si disponible)
+- **Journal d'événements** - Logs de session pour les changements de mode et erreurs
+- **Bilingue** - Interface complète en français et anglais
 - **Polling adaptatif** - Ajuste automatiquement le taux de rafraîchissement selon le temps de réponse
 - **Hors-ligne** - Fonctionne entièrement sur votre réseau local, pas d'internet requis
 
