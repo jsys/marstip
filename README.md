@@ -52,6 +52,36 @@ MarsTip is a cross-platform desktop application for monitoring Marstek home batt
 - **Backend**: Rust + Tauri 2.0
 - **Protocol**: JSON-RPC over UDP (port 30000)
 
+### Installation
+
+Download the latest version: **[GitHub Releases](https://github.com/jsys/marstip/releases/latest)**
+
+This app is not signed with an Apple or Microsoft certificate.
+
+#### macOS
+
+1. Download the `.dmg` file (Apple Silicon or Intel)
+2. Open the `.dmg` file
+3. Drag the MarsTip icon to the Applications folder
+4. Open **Terminal.app** and run:
+   ```
+   xattr -c /Applications/MarsTip.app
+   ```
+5. Launch MarsTip from Applications
+
+#### Windows
+
+1. Download the `.exe` installer
+2. Run the installer
+3. When SmartScreen shows "Windows protected your PC":
+   - Click "More info"
+   - Click "Run anyway"
+4. Launch MarsTip
+
+#### First use
+
+The app automatically detects your Marstek battery on the local network. If auto-detection fails, you can enter the battery's IP address manually.
+
 ---
 
 ## Français
@@ -85,6 +115,36 @@ MarsTip est une application desktop multi-plateforme pour surveiller les batteri
 - **Frontend**: SvelteKit + Svelte 5 + TailwindCSS v4
 - **Backend**: Rust + Tauri 2.0
 - **Protocole**: JSON-RPC sur UDP (port 30000)
+
+### Installation
+
+Télécharger la dernière version : **[GitHub Releases](https://github.com/jsys/marstip/releases/latest)**
+
+Cette application n'est pas signée avec un certificat Apple ou Microsoft.
+
+#### macOS
+
+1. Télécharger le fichier `.dmg` (Apple Silicon ou Intel)
+2. Ouvrir le fichier `.dmg`
+3. Glisser l'icône MarsTip dans le dossier Applications
+4. Ouvrir **Terminal.app** et exécuter :
+   ```
+   xattr -c /Applications/MarsTip.app
+   ```
+5. Lancer MarsTip depuis Applications
+
+#### Windows
+
+1. Télécharger l'installeur `.exe`
+2. Lancer l'installeur
+3. Quand SmartScreen affiche "Windows a protégé votre ordinateur" :
+   - Cliquer sur "Informations complémentaires"
+   - Cliquer sur "Exécuter quand même"
+4. Lancer MarsTip
+
+#### Première utilisation
+
+L'application détecte automatiquement votre batterie Marstek sur le réseau local. Si la détection automatique échoue, vous pouvez saisir l'adresse IP de la batterie manuellement.
 
 ---
 
