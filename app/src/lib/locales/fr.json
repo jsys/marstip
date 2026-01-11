@@ -1,0 +1,110 @@
+{
+  "app": {
+    "name": "MarsTip",
+    "requesting": "Requête en cours...",
+    "waiting": "En attente",
+    "failures": "{count} échec{count, plural, one {} other {s}}",
+    "failuresSince": "{count} échec{count, plural, one {} other {s}} depuis {seconds}s"
+  },
+  "tabs": {
+    "dashboard": "Dashboard",
+    "infos": "Infos",
+    "logs": "Logs"
+  },
+  "discovery": {
+    "searching": "Recherche de batterie Marstek...",
+    "selectBattery": "Sélectionner une batterie",
+    "manualConnection": "Connexion manuelle",
+    "orManualIp": "Ou entrez une adresse IP manuellement :",
+    "enterIp": "Entrez l'adresse IP de la batterie :",
+    "defaultPort": "Port par défaut : 30000",
+    "connecting": "Connexion...",
+    "connect": "Connecter",
+    "noBatteryFound": "Aucune batterie Marstek détectée",
+    "detectionRequirements": "Pour que la détection fonctionne :",
+    "batteryConnected": "Batterie allumée et connectée au même réseau local",
+    "apiEnabled": "API locale activée via l'appli mobile Marstek",
+    "retry": "Réessayer",
+    "changeBattery": "Changer de batterie"
+  },
+  "error": {
+    "connectionError": "Erreur de connexion",
+    "retry": "Réessayer",
+    "changeIp": "Modifier l'adresse IP"
+  },
+  "battery": {
+    "capacity": "{current} / {total}"
+  },
+  "modes": {
+    "Auto": "Auto",
+    "AI": "AI",
+    "Manual": "Manual",
+    "Passive": "Passive"
+  },
+  "power": {
+    "charge": "Charge",
+    "discharge": "Décharge"
+  },
+  "planning": {
+    "title": "Planning",
+    "enable": "Activer"
+  },
+  "meter": {
+    "title": "Compteur CT",
+    "phaseA": "Phase A",
+    "phaseB": "Phase B",
+    "phaseC": "Phase C",
+    "total": "Total"
+  },
+  "state": {
+    "title": "État",
+    "mode": "Mode",
+    "status": "Statut",
+    "power": "Puissance",
+    "charging": "CHARGE",
+    "discharging": "INJECTION",
+    "idle": "VEILLE"
+  },
+  "stats": {
+    "title": "Statistiques",
+    "injected": "Injecté",
+    "consumed": "Consommé",
+    "balance": "Bilan"
+  },
+  "connection": {
+    "title": "Connexion",
+    "wifi": "WiFi",
+    "signal": "Signal",
+    "ip": "IP",
+    "device": "Appareil"
+  },
+  "logs": {
+    "title": "Logs de session",
+    "copy": "Copier",
+    "clear": "Effacer",
+    "empty": "Aucun log cette session",
+    "startup": "Démarrage de MarsTip",
+    "connectionRestored": "Connexion rétablie après {count} échec{count, plural, one {} other {s}}",
+    "tempNetworkError": "Erreur réseau temporaire (os error 35)",
+    "networkError": "Erreur réseau: {error}",
+    "schedulerSwitching": "Passage en mode {mode}...",
+    "schedulerSwitchingWithPower": "Passage en mode {mode} ({direction} {power}W)...",
+    "schedulerConfirmed": "Mode {mode} confirmé",
+    "modeChangeError": "Erreur passage en mode {mode} : {error}"
+  },
+  "modal": {
+    "editSlot": "Modifier la plage",
+    "direction": "Direction",
+    "powerW": "Puissance (W)",
+    "countdown": "Countdown (secondes)",
+    "configuration": "Configuration {mode}",
+    "deleteSlot": "Supprimer cette plage",
+    "split": "Diviser",
+    "cancel": "Annuler",
+    "save": "Sauvegarder",
+    "selectChargeOrDischarge": "Choisir Charge ou Décharge"
+  },
+  "slider": {
+    "adjustBoundary": "Ajuster la frontière"
+  }
+}

@@ -2,6 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { load } from '@tauri-apps/plugin-store';
+  import { _, locale } from 'svelte-i18n';
+  import { setLocale, type SupportedLocale } from '$lib/i18n';
   import type { Store } from '@tauri-apps/plugin-store';
 
   const isTauriEnv = '__TAURI_INTERNALS__' in window;
@@ -86,8 +88,6 @@
     soc < 50 ? 'bg-yellow-500' : 'bg-green-500'
   );
   let energyBilan = $derived((data?.energy?.total_grid_output_energy ?? 0) - (data?.energy?.total_grid_input_energy ?? 0));
-  let slotNeedsConfig = $derived(editingSlot?.mode === 'Manual' || editingSlot?.mode === 'Passive');
-  let canSaveSlot = $derived(!slotNeedsConfig || editingSlot?.config?.isCharge !== undefined);
 
   // Auto-discovery states
   let discovering = $state(true);
@@ -107,6 +107,8 @@
   ]);
   let schedulerEnabled = $state(false);
   let editingSlot = $state<TimeSlot | null>(null);
+  let slotNeedsConfig = $derived(editingSlot?.mode === 'Manual' || editingSlot?.mode === 'Passive');
+  let canSaveSlot = $derived(!slotNeedsConfig || editingSlot?.config?.isCharge !== undefined);
   let showSlotModal = $state(false);
   let currentScheduledSlotId = $state<string | null>(null);  // Plage confirmée
   let pendingSchedulerSlotId = $state<string | null>(null);  // Plage en cours de tentative
@@ -156,6 +158,9 @@
       if (savedSlots) timeSlots = savedSlots;
       const savedScheduler = await storageGet<boolean>('scheduler_enabled');
       if (savedScheduler !== null) schedulerEnabled = savedScheduler;
+      // Charger la langue sauvegardée
+      const savedLang = await storageGet<string>('locale');
+      if (savedLang) setLocale(savedLang as SupportedLocale);
     } catch (e) {
       console.error('Error loading saved configs:', e);
     }
@@ -168,6 +173,11 @@
     } catch (e) {
       console.error('Error saving time slots:', e);
     }
+  }
+
+  async function switchLocale(lang: SupportedLocale) {
+    setLocale(lang);
+    await storageSet('locale', lang);
   }
 
   // --- Logging functions ---
@@ -329,8 +339,12 @@
 
       // Log consolidé
       if (isFirstAttempt) {
-        const detail = hasConfig ? ` (${slot.config!.isCharge ? 'charge' : 'décharge'} ${Math.abs(power)}W)` : '';
-        addLog('mode_change', `Scheduler: passage en mode ${slot.mode}${detail}`);
+        if (hasConfig) {
+          const direction = slot.config!.isCharge ? $_('power.charge').toLowerCase() : $_('power.discharge').toLowerCase();
+          addLog('mode_change', $_('logs.schedulerSwitchingWithPower', { values: { mode: slot.mode, direction, power: Math.abs(power) } }));
+        } else {
+          addLog('mode_change', $_('logs.schedulerSwitching', { values: { mode: slot.mode } }));
+        }
       }
 
       pendingSchedulerSlotId = slot.id;
@@ -339,7 +353,7 @@
     // Mode correct → vérifier si c'était une tentative en cours
     else {
       if (pendingSchedulerSlotId === slot.id) {
-        addLog('mode_change', `Scheduler: mode ${slot.mode} confirmé`);
+        addLog('mode_change', $_('logs.schedulerConfirmed', { values: { mode: slot.mode } }));
         pendingSchedulerSlotId = null;
       }
       currentScheduledSlotId = slot.id;
@@ -446,7 +460,7 @@
       error = null;
       // Reset temp error on success
       if (tempErrorSince) {
-        addLog('mode_change', `Connexion rétablie après ${tempErrorCount} échec(s)`);
+        addLog('mode_change', $_('logs.connectionRestored', { values: { count: tempErrorCount } }));
       }
       tempErrorCount = 0;
       tempErrorSince = null;
@@ -457,7 +471,7 @@
         tempErrorCount++;
         if (!tempErrorSince) {
           tempErrorSince = Date.now();
-          addLog('error', 'Erreur réseau temporaire (os error 35)');
+          addLog('error', $_('logs.tempNetworkError'));
         }
         hasError = true;
         // Ne pas mettre error, garder les données précédentes
@@ -467,7 +481,7 @@
         // Reset temp error pour une vraie erreur
         tempErrorCount = 0;
         tempErrorSince = null;
-        addLog('error', `Erreur réseau: ${errStr}`);
+        addLog('error', $_('logs.networkError', { values: { error: errStr } }));
       }
     } finally {
       loading = false;
@@ -567,7 +581,7 @@
     await loadSavedConfigs();
 
     // Log de démarrage
-    addLog('mode_change', 'Démarrage de MarsTip');
+    addLog('mode_change', $_('logs.startup'));
 
     if (isTauriEnv) {
       // Mode Tauri - auto-découverte
@@ -641,7 +655,7 @@
       await fetchData();
     } catch (e) {
       console.error('Error applying mode:', e);
-      addLog('error', `Erreur changement mode ${mode}: ${e}`);
+      addLog('error', $_('logs.modeChangeError', { values: { mode, error: String(e) } }));
     }
   }
 </script>
@@ -669,10 +683,10 @@
       disabled={connecting || !manualIp.trim()}
       class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-800 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors whitespace-nowrap"
     >
-      {connecting ? 'Connexion...' : 'Connecter'}
+      {connecting ? $_('discovery.connecting') : $_('discovery.connect')}
     </button>
   </div>
-  <p class="text-slate-500 text-xs mt-2">Port par défaut : 30000</p>
+  <p class="text-slate-500 text-xs mt-2">{$_('discovery.defaultPort')}</p>
 {/snippet}
 
 <main class="h-screen bg-slate-900 p-4 overflow-hidden flex flex-col">
@@ -682,10 +696,10 @@
       <h1 class="text-xl font-bold text-white">MarsTip</h1>
       <span
         class="w-2 h-2 rounded-full transition-all duration-150 {fetching ? 'bg-cyan-400 shadow-[0_0_8px_2px_rgba(34,211,238,0.6)]' : tempErrorCount > 0 ? 'bg-orange-400' : 'bg-slate-600'}"
-        title={fetching ? 'Requête en cours...' : tempErrorCount > 0 ? `${tempErrorCount} échec(s)` : 'En attente'}
+        title={fetching ? $_('app.requesting') : tempErrorCount > 0 ? $_('app.failures', { values: { count: tempErrorCount } }) : $_('app.waiting')}
       ></span>
       {#if tempErrorCount > 0 && tempErrorSince}
-        <span class="text-orange-400 text-xs">{tempErrorCount} échec{tempErrorCount > 1 ? 's' : ''} depuis {Math.round((Date.now() - tempErrorSince) / 1000)}s</span>
+        <span class="text-orange-400 text-xs">{$_('app.failuresSince', { values: { count: tempErrorCount, seconds: Math.round((Date.now() - tempErrorSince) / 1000) } })}</span>
       {/if}
     </div>
     <div class="flex items-center gap-2">
@@ -696,26 +710,26 @@
             onclick={() => activeTab = 'dashboard'}
             class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'dashboard' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
           >
-            Dashboard
+            {$_('tabs.dashboard')}
           </button>
           <button
             onclick={() => activeTab = 'infos'}
             class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'infos' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
           >
-            Infos
+            {$_('tabs.infos')}
           </button>
           <button
             onclick={() => activeTab = 'logs'}
             class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'logs' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
           >
-            Logs
+            {$_('tabs.logs')}
           </button>
         </div>
         <!-- Bouton paramètres -->
         <button
           onclick={openDeviceSelector}
           class="p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
-          title="Changer de batterie"
+          title={$_('discovery.changeBattery')}
         >
           <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -729,7 +743,7 @@
   {#if discovering}
     <div class="flex flex-col items-center justify-center h-64 gap-4">
       <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-500"></div>
-      <p class="text-slate-400">Recherche de batterie Marstek...</p>
+      <p class="text-slate-400">{$_('discovery.searching')}</p>
     </div>
 
   {:else if showDeviceSelector}
@@ -737,7 +751,7 @@
       <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 mb-6">
         <h3 class="text-xl font-bold text-white mb-4 flex items-center gap-2">
           <span class="text-2xl">🔋</span>
-          {allDevices.length > 0 ? 'Sélectionner une batterie' : 'Connexion manuelle'}
+          {allDevices.length > 0 ? $_('discovery.selectBattery') : $_('discovery.manualConnection')}
         </h3>
 
         {#if allDevices.length > 0}
@@ -762,7 +776,7 @@
 
         <div class="border-t border-slate-600 pt-4">
           <p class="text-slate-400 text-sm mb-3">
-            {allDevices.length > 0 ? 'Ou entrez une adresse IP manuellement :' : 'Entrez l\'adresse IP de la batterie :'}
+            {allDevices.length > 0 ? $_('discovery.orManualIp') : $_('discovery.enterIp')}
           </p>
           {@render manualIpForm()}
         </div>
@@ -774,14 +788,14 @@
       <div class="bg-amber-900/50 border border-amber-500 rounded-xl p-6">
         <h3 class="text-xl font-bold text-amber-200 mb-4 flex items-center gap-2">
           <span class="text-2xl">🔍</span>
-          Aucune batterie Marstek détectée
+          {$_('discovery.noBatteryFound')}
         </h3>
 
         <div class="text-amber-100 text-sm">
-          <p class="font-medium mb-2">Pour que la détection fonctionne :</p>
+          <p class="font-medium mb-2">{$_('discovery.detectionRequirements')}</p>
           <ul class="list-disc list-inside space-y-1 text-amber-200/80">
-            <li>Batterie <strong class="text-amber-100">allumée et connectée</strong> au même réseau local</li>
-            <li><strong class="text-amber-100">API locale activée</strong> via l'appli mobile Marstek</li>
+            <li>{$_('discovery.batteryConnected')}</li>
+            <li>{$_('discovery.apiEnabled')}</li>
           </ul>
         </div>
 
@@ -790,12 +804,12 @@
             onclick={retryDiscovery}
             class="px-6 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-medium rounded-lg transition-colors"
           >
-            Réessayer
+            {$_('discovery.retry')}
           </button>
         </div>
 
         <div class="mt-4 pt-4 border-t border-amber-500/30">
-          <p class="text-slate-400 text-sm mb-3">Ou entrez l'adresse IP manuellement :</p>
+          <p class="text-slate-400 text-sm mb-3">{$_('discovery.orManualIp')}</p>
           {@render manualIpForm()}
         </div>
       </div>
@@ -808,7 +822,7 @@
 
   {:else if error}
     <div class="bg-red-900/50 border border-red-500 rounded-xl p-6 text-red-200 max-w-2xl mx-auto">
-      <h3 class="font-bold text-lg mb-2">Erreur de connexion</h3>
+      <h3 class="font-bold text-lg mb-2">{$_('error.connectionError')}</h3>
       <p class="mb-4">{error}</p>
       <div class="flex gap-3">
         <button
@@ -819,7 +833,7 @@
           }}
           class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-medium rounded-lg transition-colors"
         >
-          Réessayer
+          {$_('error.retry')}
         </button>
         <button
           onclick={() => {
@@ -830,7 +844,7 @@
           }}
           class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors"
         >
-          Modifier l'adresse IP
+          {$_('error.changeIp')}
         </button>
       </div>
     </div>
@@ -869,7 +883,7 @@
           <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
             <div class="flex items-center justify-between mb-3">
               <h2 class="text-sm font-semibold text-slate-300 flex items-center gap-2">
-                <span>📅</span> Planning
+                <span>📅</span> {$_('planning.title')}
               </h2>
               <label class="flex items-center gap-2 cursor-pointer">
                 <input
@@ -878,7 +892,7 @@
                   onchange={toggleScheduler}
                   class="w-3 h-3 accent-cyan-500"
                 />
-                <span class="text-xs text-slate-400">Activer</span>
+                <span class="text-xs text-slate-400">{$_('planning.enable')}</span>
               </label>
             </div>
 
@@ -902,9 +916,9 @@
                     title="{formatHour(slot.startHour)} - {formatHour(slot.endHour)}: {slot.mode}"
                   >
                     {#if (slot.mode === 'Manual' || slot.mode === 'Passive') && slot.config?.isCharge !== undefined}
-                      <span class="text-[10px] font-medium text-white/90 truncate px-1">{slot.config.isCharge ? 'Charge' : 'Décharge'}</span>
+                      <span class="text-[10px] font-medium text-white/90 truncate px-1">{slot.config.isCharge ? $_('power.charge') : $_('power.discharge')}</span>
                     {:else}
-                      <span class="text-[10px] font-medium text-white/90 truncate px-1">{slot.mode}</span>
+                      <span class="text-[10px] font-medium text-white/90 truncate px-1">{$_(`modes.${slot.mode}`)}</span>
                     {/if}
                   </button>
                   {#if i < timeSlots.length - 1}
@@ -913,7 +927,7 @@
                       style="left: {slot.endHour / 24 * 100}%"
                       onmousedown={(e) => startDrag(i, e)}
                       role="slider"
-                      aria-label="Ajuster la frontière"
+                      aria-label={$_('slider.adjustBoundary')}
                       aria-valuemin={0}
                       aria-valuemax={24}
                       aria-valuenow={slot.endHour}
@@ -960,7 +974,7 @@
           {#if data.meter.ct_state === 1}
             <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
               <h2 class="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
-                <span>📊</span> Compteur CT
+                <span>📊</span> {$_('meter.title')}
               </h2>
               <div class="flex items-center justify-between">
                 <div class="flex gap-4 text-xs">
@@ -980,21 +994,21 @@
           <!-- État -->
           <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
             <h2 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-              <span>⚙️</span> État
+              <span>⚙️</span> {$_('state.title')}
             </h2>
             <div class="space-y-2 text-sm">
               <div class="flex justify-between">
-                <span class="text-slate-400">Mode</span>
+                <span class="text-slate-400">{$_('state.mode')}</span>
                 <span class="text-white font-medium">{data.mode.mode ?? 'N/A'}</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-slate-400">Statut</span>
+                <span class="text-slate-400">{$_('state.status')}</span>
                 <span class="{isCharging ? 'text-blue-400' : isDischarging ? 'text-red-400' : 'text-slate-400'} font-medium">
-                  {isCharging ? 'CHARGE' : isDischarging ? 'INJECTION' : 'VEILLE'}
+                  {isCharging ? $_('state.charging') : isDischarging ? $_('state.discharging') : $_('state.idle')}
                 </span>
               </div>
               <div class="flex justify-between">
-                <span class="text-slate-400">Puissance</span>
+                <span class="text-slate-400">{$_('state.power')}</span>
                 <span class="text-white font-medium">{formatPower(data.energy.ongrid_power)}</span>
               </div>
             </div>
@@ -1003,19 +1017,19 @@
           <!-- Statistiques -->
           <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
             <h2 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-              <span>📈</span> Statistiques
+              <span>📈</span> {$_('stats.title')}
             </h2>
             <div class="space-y-2 text-sm">
               <div class="flex justify-between">
-                <span class="text-slate-400">Injecté</span>
+                <span class="text-slate-400">{$_('stats.injected')}</span>
                 <span class="text-green-400 font-medium">{formatEnergy(data.energy.total_grid_output_energy)}</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-slate-400">Consommé</span>
+                <span class="text-slate-400">{$_('stats.consumed')}</span>
                 <span class="text-yellow-400 font-medium">{formatEnergy(data.energy.total_grid_input_energy)}</span>
               </div>
               <div class="flex justify-between border-t border-slate-600 pt-2">
-                <span class="text-slate-300">Bilan</span>
+                <span class="text-slate-300">{$_('stats.balance')}</span>
                 <span class="{energyBilan > 0 ? 'text-green-400' : 'text-yellow-400'} font-bold">
                   {formatEnergy(energyBilan)}
                 </span>
@@ -1027,23 +1041,23 @@
           {#if data.meter.ct_state === 1}
             <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
               <h2 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                <span>📊</span> Compteur CT
+                <span>📊</span> {$_('meter.title')}
               </h2>
               <div class="space-y-2 text-sm">
                 <div class="flex justify-between">
-                  <span class="text-slate-400">Phase A</span>
+                  <span class="text-slate-400">{$_('meter.phaseA')}</span>
                   <span class="text-white font-medium">{formatPower(data.meter.a_power)}</span>
                 </div>
                 <div class="flex justify-between">
-                  <span class="text-slate-400">Phase B</span>
+                  <span class="text-slate-400">{$_('meter.phaseB')}</span>
                   <span class="text-white font-medium">{formatPower(data.meter.b_power)}</span>
                 </div>
                 <div class="flex justify-between">
-                  <span class="text-slate-400">Phase C</span>
+                  <span class="text-slate-400">{$_('meter.phaseC')}</span>
                   <span class="text-white font-medium">{formatPower(data.meter.c_power)}</span>
                 </div>
                 <div class="border-t border-slate-600 pt-2 flex justify-between">
-                  <span class="text-slate-300">Total</span>
+                  <span class="text-slate-300">{$_('meter.total')}</span>
                   <span class="{(data.meter.total_power ?? 0) < 0 ? 'text-blue-400' : 'text-red-400'} font-bold">{formatPower(data.meter.total_power)}</span>
                 </div>
               </div>
@@ -1053,23 +1067,23 @@
           <!-- Connexion -->
           <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
             <h2 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-              <span>📡</span> Connexion
+              <span>📡</span> {$_('connection.title')}
             </h2>
             <div class="space-y-2 text-sm">
               <div class="flex justify-between">
-                <span class="text-slate-400">WiFi</span>
+                <span class="text-slate-400">{$_('connection.wifi')}</span>
                 <span class="text-white font-medium">{data.wifi.ssid}</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-slate-400">Signal</span>
+                <span class="text-slate-400">{$_('connection.signal')}</span>
                 <span class="text-white font-medium">{data.wifi.rssi} dBm</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-slate-400">IP</span>
+                <span class="text-slate-400">{$_('connection.ip')}</span>
                 <span class="text-white font-medium">{data.device.ip}</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-slate-400">Appareil</span>
+                <span class="text-slate-400">{$_('connection.device')}</span>
                 <span class="text-white font-medium">{data.device.device} v{data.device.ver}</span>
               </div>
             </div>
@@ -1081,7 +1095,7 @@
         <div class="flex flex-col h-full">
           <div class="flex justify-between items-center mb-2">
             <h2 class="text-lg font-bold text-white flex items-center gap-2">
-              <span>📋</span> Logs de session
+              <span>📋</span> {$_('logs.title')}
             </h2>
             <div class="flex gap-2">
               <button
@@ -1090,21 +1104,21 @@
                   navigator.clipboard.writeText(text);
                 }}
                 class="text-xs text-slate-400 hover:text-white transition-colors"
-                title="Copier dans le presse-papier"
+                title={$_('logs.copy')}
               >
-                Copier
+                {$_('logs.copy')}
               </button>
               <button
                 onclick={() => logs = []}
                 class="text-xs text-slate-400 hover:text-white transition-colors"
               >
-                Effacer
+                {$_('logs.clear')}
               </button>
             </div>
           </div>
           <div class="flex-1 bg-slate-800 rounded-lg p-3 overflow-y-auto font-mono text-xs border border-slate-700">
             {#if logs.length === 0}
-              <p class="text-slate-500 italic">Aucun log cette session</p>
+              <p class="text-slate-500 italic">{$_('logs.empty')}</p>
             {:else}
               {#each logs as log}
                 <div class="py-0.5 {log.type === 'error' ? 'text-red-400' : 'text-cyan-400'}">
@@ -1124,41 +1138,41 @@
     <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
       <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 w-full max-w-md">
         <h3 class="text-xl font-bold text-white mb-4">
-          Modifier la plage
+          {$_('modal.editSlot')}
         </h3>
 
         <div class="space-y-4">
           <!-- Mode -->
           <fieldset>
-            <legend class="block text-slate-400 text-sm mb-2">Mode</legend>
+            <legend class="block text-slate-400 text-sm mb-2">{$_('state.mode')}</legend>
             <div class="grid grid-cols-4 gap-2">
               <button
                 type="button"
                 onclick={() => editingSlot && (editingSlot.mode = 'Auto')}
                 class="px-3 py-2 rounded-lg text-sm font-medium transition-all {editingSlot.mode === 'Auto' ? 'bg-cyan-500 text-white ring-2 ring-cyan-300' : 'bg-cyan-500/30 text-cyan-300 hover:bg-cyan-500/50'}"
               >
-                Auto
+                {$_('modes.Auto')}
               </button>
               <button
                 type="button"
                 onclick={() => editingSlot && (editingSlot.mode = 'AI')}
                 class="px-3 py-2 rounded-lg text-sm font-medium transition-all {editingSlot.mode === 'AI' ? 'bg-purple-500 text-white ring-2 ring-purple-300' : 'bg-purple-500/30 text-purple-300 hover:bg-purple-500/50'}"
               >
-                AI
+                {$_('modes.AI')}
               </button>
               <button
                 type="button"
                 onclick={() => editingSlot && (editingSlot.mode = 'Manual')}
                 class="px-3 py-2 rounded-lg text-sm font-medium transition-all {editingSlot.mode === 'Manual' ? 'bg-yellow-500 text-white ring-2 ring-yellow-300' : 'bg-yellow-500/30 text-yellow-300 hover:bg-yellow-500/50'}"
               >
-                Manual
+                {$_('modes.Manual')}
               </button>
               <button
                 type="button"
                 onclick={() => editingSlot && (editingSlot.mode = 'Passive')}
                 class="px-3 py-2 rounded-lg text-sm font-medium transition-all {editingSlot.mode === 'Passive' ? 'bg-green-500 text-white ring-2 ring-green-300' : 'bg-green-500/30 text-green-300 hover:bg-green-500/50'}"
               >
-                Passive
+                {$_('modes.Passive')}
               </button>
             </div>
           </fieldset>
@@ -1173,11 +1187,11 @@
           <!-- Config spécifique si Manual ou Passive -->
           {#if editingSlot.mode === 'Manual' || editingSlot.mode === 'Passive'}
             <div class="border-t border-slate-600 pt-4 mt-4">
-              <p class="text-slate-400 text-sm mb-3">Configuration {editingSlot.mode}</p>
+              <p class="text-slate-400 text-sm mb-3">{$_('modal.configuration', { values: { mode: editingSlot.mode } })}</p>
 
               <!-- Direction -->
               <fieldset class="mb-3">
-                <legend class="block text-slate-400 text-xs mb-1">Direction</legend>
+                <legend class="block text-slate-400 text-xs mb-1">{$_('modal.direction')}</legend>
                 <div class="flex gap-2">
                   <button
                     type="button"
@@ -1189,7 +1203,7 @@
                     }}
                     class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {editingSlot.config?.isCharge ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
                   >
-                    Charge
+                    {$_('power.charge')}
                   </button>
                   <button
                     type="button"
@@ -1201,14 +1215,14 @@
                     }}
                     class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors {editingSlot.config?.isCharge === false ? 'bg-red-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}"
                   >
-                    Décharge
+                    {$_('power.discharge')}
                   </button>
                 </div>
               </fieldset>
 
               <!-- Puissance -->
               <div class="mb-3">
-                <label for="slot-power" class="block text-slate-400 text-xs mb-1">Puissance (W)</label>
+                <label for="slot-power" class="block text-slate-400 text-xs mb-1">{$_('modal.powerW')}</label>
                 <input
                   id="slot-power"
                   type="number"
@@ -1229,7 +1243,7 @@
               <!-- Countdown pour Passive -->
               {#if editingSlot.mode === 'Passive'}
                 <div>
-                  <label for="slot-countdown" class="block text-slate-400 text-xs mb-1">Countdown (secondes)</label>
+                  <label for="slot-countdown" class="block text-slate-400 text-xs mb-1">{$_('modal.countdown')}</label>
                   <input
                     id="slot-countdown"
                     type="number"
@@ -1256,7 +1270,7 @@
             <button
               onclick={() => editingSlot && deleteSlot(editingSlot.id)}
               class="p-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors"
-              title="Supprimer cette plage"
+              title={$_('modal.deleteSlot')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -1266,33 +1280,45 @@
           <button
             onclick={() => editingSlot && addSlotAfter(editingSlot)}
             class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors"
-            title="Diviser cette plage en deux"
+            title={$_('modal.split')}
           >
-            Diviser
+            {$_('modal.split')}
           </button>
           <div class="flex-1"></div>
           <button
             onclick={closeSlotModal}
             class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors"
           >
-            Annuler
+            {$_('modal.cancel')}
           </button>
           <button
             onclick={saveSlot}
             disabled={!canSaveSlot}
             class="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
-            title={!canSaveSlot ? 'Choisir Charge ou Décharge' : ''}
+            title={!canSaveSlot ? $_('modal.selectChargeOrDischarge') : ''}
           >
-            Sauvegarder
+            {$_('modal.save')}
           </button>
         </div>
       </div>
     </div>
   {/if}
 
-  <footer class="mt-auto pt-2 text-center">
+  <footer class="mt-auto pt-2 flex items-center justify-center gap-4">
     <a href="http://to.jsys.fr/Rg1F9B" target="_blank" class="text-slate-500 hover:text-slate-400 text-xs transition-colors">
       https://github.com/jsys/marstip
     </a>
+    <div class="flex gap-1">
+      <button
+        onclick={() => switchLocale('fr')}
+        class="text-base transition-opacity {$locale === 'fr' ? 'opacity-100' : 'opacity-40 hover:opacity-70'}"
+        title="Français"
+      >🇫🇷</button>
+      <button
+        onclick={() => switchLocale('en')}
+        class="text-base transition-opacity {$locale === 'en' ? 'opacity-100' : 'opacity-40 hover:opacity-70'}"
+        title="English"
+      >🇬🇧</button>
+    </div>
   </footer>
 </main>

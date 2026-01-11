@@ -1,0 +1,110 @@
+{
+  "app": {
+    "name": "MarsTip",
+    "requesting": "Requesting...",
+    "waiting": "Waiting",
+    "failures": "{count} failure{count, plural, one {} other {s}}",
+    "failuresSince": "{count} failure{count, plural, one {} other {s}} for {seconds}s"
+  },
+  "tabs": {
+    "dashboard": "Dashboard",
+    "infos": "Info",
+    "logs": "Logs"
+  },
+  "discovery": {
+    "searching": "Searching for Marstek battery...",
+    "selectBattery": "Select a battery",
+    "manualConnection": "Manual connection",
+    "orManualIp": "Or enter an IP address manually:",
+    "enterIp": "Enter battery IP address:",
+    "defaultPort": "Default port: 30000",
+    "connecting": "Connecting...",
+    "connect": "Connect",
+    "noBatteryFound": "No Marstek battery detected",
+    "detectionRequirements": "For detection to work:",
+    "batteryConnected": "Battery powered on and connected to the same network",
+    "apiEnabled": "Local API enabled via Marstek mobile app",
+    "retry": "Retry",
+    "changeBattery": "Change battery"
+  },
+  "error": {
+    "connectionError": "Connection error",
+    "retry": "Retry",
+    "changeIp": "Change IP address"
+  },
+  "battery": {
+    "capacity": "{current} / {total}"
+  },
+  "modes": {
+    "Auto": "Auto",
+    "AI": "AI",
+    "Manual": "Manual",
+    "Passive": "Passive"
+  },
+  "power": {
+    "charge": "Charge",
+    "discharge": "Discharge"
+  },
+  "planning": {
+    "title": "Schedule",
+    "enable": "Enable"
+  },
+  "meter": {
+    "title": "CT Meter",
+    "phaseA": "Phase A",
+    "phaseB": "Phase B",
+    "phaseC": "Phase C",
+    "total": "Total"
+  },
+  "state": {
+    "title": "State",
+    "mode": "Mode",
+    "status": "Status",
+    "power": "Power",
+    "charging": "CHARGING",
+    "discharging": "DISCHARGING",
+    "idle": "IDLE"
+  },
+  "stats": {
+    "title": "Statistics",
+    "injected": "Injected",
+    "consumed": "Consumed",
+    "balance": "Balance"
+  },
+  "connection": {
+    "title": "Connection",
+    "wifi": "WiFi",
+    "signal": "Signal",
+    "ip": "IP",
+    "device": "Device"
+  },
+  "logs": {
+    "title": "Session logs",
+    "copy": "Copy",
+    "clear": "Clear",
+    "empty": "No logs this session",
+    "startup": "MarsTip started",
+    "connectionRestored": "Connection restored after {count} failure{count, plural, one {} other {s}}",
+    "tempNetworkError": "Temporary network error (os error 35)",
+    "networkError": "Network error: {error}",
+    "schedulerSwitching": "Switching to {mode} mode...",
+    "schedulerSwitchingWithPower": "Switching to {mode} mode ({direction} {power}W)...",
+    "schedulerConfirmed": "{mode} mode confirmed",
+    "modeChangeError": "Error switching to {mode} mode: {error}"
+  },
+  "modal": {
+    "editSlot": "Edit time slot",
+    "direction": "Direction",
+    "powerW": "Power (W)",
+    "countdown": "Countdown (seconds)",
+    "configuration": "{mode} configuration",
+    "deleteSlot": "Delete this slot",
+    "split": "Split",
+    "cancel": "Cancel",
+    "save": "Save",
+    "selectChargeOrDischarge": "Select Charge or Discharge"
+  },
+  "slider": {
+    "adjustBoundary": "Adjust boundary"
+  }
+}
