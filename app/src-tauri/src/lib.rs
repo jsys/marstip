@@ -5,13 +5,14 @@ use std::time::Duration;
 use tauri::State;
 
 const DEFAULT_PORT: u16 = 30000;
-const TIMEOUT_MS: u64 = 5000;
+const DEFAULT_TIMEOUT_MS: u64 = 2000;
 
 // State management
 #[derive(Default)]
 struct DeviceConfig {
     ip: Option<String>,
     port: u16,
+    timeout_ms: u64,
 }
 
 struct AppState {
@@ -102,9 +103,12 @@ pub struct DashboardData {
     pub timestamp: String,
 }
 
-fn send_command(ip: &str, port: u16, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-    socket.set_read_timeout(Some(Duration::from_millis(TIMEOUT_MS))).map_err(|e| e.to_string())?;
+fn send_command(ip: &str, port: u16, timeout_ms: u64, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    // Try port 30000 first (some Marstek devices require source port = destination port)
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", DEFAULT_PORT))
+        .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
+        .map_err(|e| e.to_string())?;
+    socket.set_read_timeout(Some(Duration::from_millis(timeout_ms))).map_err(|e| e.to_string())?;
 
     let request = ApiRequest {
         id: 1,
@@ -127,7 +131,10 @@ fn send_command(ip: &str, port: u16, method: &str, params: serde_json::Value) ->
 
 #[tauri::command]
 fn discover_devices() -> Result<Vec<DiscoveredDevice>, String> {
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    // Try port 30000 first (some Marstek devices require source port = destination port)
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", DEFAULT_PORT))
+        .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
+        .map_err(|e| e.to_string())?;
     socket.set_broadcast(true).map_err(|e| e.to_string())?;
     socket.set_read_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
 
@@ -200,11 +207,18 @@ struct SetModeConfig {
 }
 
 #[tauri::command]
+fn set_timeout(state: State<AppState>, timeout_ms: u64) -> Result<(), String> {
+    let mut config = state.device.lock().map_err(|e| e.to_string())?;
+    config.timeout_ms = timeout_ms;
+    Ok(())
+}
+
+#[tauri::command]
 fn set_mode(state: State<AppState>, mode: String, config: Option<serde_json::Value>) -> Result<bool, String> {
-    let (ip, port) = {
+    let (ip, port, timeout_ms) = {
         let device_config = state.device.lock().map_err(|e| e.to_string())?;
         let ip = device_config.ip.clone().ok_or("Device not configured. Call set_device first.")?;
-        (ip, device_config.port)
+        (ip, device_config.port, device_config.timeout_ms)
     };
 
     // Construire le payload selon le mode
@@ -243,7 +257,7 @@ fn set_mode(state: State<AppState>, mode: String, config: Option<serde_json::Val
         "config": mode_config
     });
 
-    let result = send_command(&ip, port, "ES.SetMode", params)?;
+    let result = send_command(&ip, port, timeout_ms, "ES.SetMode", params)?;
 
     // Retourner set_result si présent, sinon true si pas d'erreur
     Ok(result.get("set_result").and_then(|v| v.as_bool()).unwrap_or(true))
@@ -251,40 +265,40 @@ fn set_mode(state: State<AppState>, mode: String, config: Option<serde_json::Val
 
 #[tauri::command]
 fn get_dashboard(state: State<AppState>) -> Result<DashboardData, String> {
-    let (ip, port) = {
+    let (ip, port, timeout_ms) = {
         let config = state.device.lock().map_err(|e| e.to_string())?;
         let ip = config.ip.clone().ok_or("Device not configured. Call set_device first.")?;
-        (ip, config.port)
+        (ip, config.port, config.timeout_ms)
     };
 
-    let device_result = send_command(&ip, port, "Marstek.GetDevice", serde_json::json!({"ble_mac": "0"}))?;
+    let device_result = send_command(&ip, port, timeout_ms, "Marstek.GetDevice", serde_json::json!({"ble_mac": "0"}))?;
     let device: DeviceInfo = serde_json::from_value(device_result).unwrap_or(DeviceInfo {
         device: None, ver: None, ble_mac: None, wifi_mac: None, wifi_name: None, ip: None,
     });
 
-    let es_result = send_command(&ip, port, "ES.GetStatus", serde_json::json!({"id": 0}))?;
+    let es_result = send_command(&ip, port, timeout_ms, "ES.GetStatus", serde_json::json!({"id": 0}))?;
     let energy: EnergyStatus = serde_json::from_value(es_result).unwrap_or(EnergyStatus {
         bat_soc: None, bat_cap: None, pv_power: None, ongrid_power: None, offgrid_power: None,
         bat_power: None, total_pv_energy: None, total_grid_output_energy: None,
         total_grid_input_energy: None, total_load_energy: None,
     });
 
-    let bat_result = send_command(&ip, port, "Bat.GetStatus", serde_json::json!({"id": 0}))?;
+    let bat_result = send_command(&ip, port, timeout_ms, "Bat.GetStatus", serde_json::json!({"id": 0}))?;
     let battery: BatteryStatus = serde_json::from_value(bat_result).unwrap_or(BatteryStatus {
         soc: None, charg_flag: None, dischrg_flag: None, bat_temp: None, bat_capacity: None, rated_capacity: None,
     });
 
-    let wifi_result = send_command(&ip, port, "Wifi.GetStatus", serde_json::json!({"id": 0}))?;
+    let wifi_result = send_command(&ip, port, timeout_ms, "Wifi.GetStatus", serde_json::json!({"id": 0}))?;
     let wifi: WifiStatus = serde_json::from_value(wifi_result).unwrap_or(WifiStatus {
         ssid: None, rssi: None, sta_ip: None,
     });
 
-    let mode_result = send_command(&ip, port, "ES.GetMode", serde_json::json!({"id": 0}))?;
+    let mode_result = send_command(&ip, port, timeout_ms, "ES.GetMode", serde_json::json!({"id": 0}))?;
     let mode: ModeStatus = serde_json::from_value(mode_result).unwrap_or(ModeStatus {
         mode: None, ongrid_power: None, offgrid_power: None, bat_soc: None,
     });
 
-    let em_result = send_command(&ip, port, "EM.GetStatus", serde_json::json!({"id": 0}))?;
+    let em_result = send_command(&ip, port, timeout_ms, "EM.GetStatus", serde_json::json!({"id": 0}))?;
     let meter: MeterStatus = serde_json::from_value(em_result).unwrap_or(MeterStatus {
         ct_state: None, a_power: None, b_power: None, c_power: None, total_power: None,
     });
@@ -312,6 +326,7 @@ pub fn run() {
             device: Mutex::new(DeviceConfig {
                 ip: None,
                 port: DEFAULT_PORT,
+                timeout_ms: DEFAULT_TIMEOUT_MS,
             }),
         })
         .invoke_handler(tauri::generate_handler![
@@ -319,7 +334,8 @@ pub fn run() {
             discover_devices,
             set_device,
             get_device,
-            set_mode
+            set_mode,
+            set_timeout
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

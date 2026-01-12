@@ -106,5 +106,11 @@
   },
   "slider": {
     "adjustBoundary": "Adjust boundary"
+  },
+  "config": {
+    "title": "Settings",
+    "refreshRate": "Refresh interval (paused when minimized)",
+    "schedulerInterval": "Mode check interval",
+    "timeout": "Network timeout"
   }
 }

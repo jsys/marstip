@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { getVersion } from '@tauri-apps/api/app';
   import { load } from '@tauri-apps/plugin-store';
   import { _, locale } from 'svelte-i18n';
   import { setLocale, type SupportedLocale } from '$lib/i18n';
@@ -90,7 +91,8 @@
   let energyBilan = $derived((data?.energy?.total_grid_output_energy ?? 0) - (data?.energy?.total_grid_input_energy ?? 0));
 
   // Auto-discovery states
-  let discovering = $state(true);
+  let discovering = $state(false);
+  let initializing = $state(true);
   let deviceConfigured = $state(false);
   let discoveryError = $state<string | null>(null);
   let manualIp = $state('');
@@ -100,6 +102,9 @@
   let connecting = $state(false);
   let fetching = $state(false);
   let currentInterval = $state(3000);
+  let configuredRefreshRate = $state(3000); // User-configurable refresh rate
+  let schedulerCheckInterval = $state(60000); // User-configurable scheduler interval (default 1min)
+  let configuredTimeout = $state(2000); // Network timeout in ms (default 2s)
 
   // Planning / Scheduler states
   let timeSlots = $state<TimeSlot[]>([
@@ -113,6 +118,7 @@
   let currentScheduledSlotId = $state<string | null>(null);  // Plage confirmée
   let pendingSchedulerSlotId = $state<string | null>(null);  // Plage en cours de tentative
   let schedulerInterval: ReturnType<typeof setInterval>;
+  let errorTimer: ReturnType<typeof setInterval>;
 
   // Drag & drop states
   let draggingBoundary = $state<number | null>(null); // Index de la frontière (entre slot i et i+1)
@@ -127,10 +133,12 @@
 
   // Visibility state (pause polling when minimized)
   let isVisible = $state(true);
+  let appVersion = $state('');
 
   // Temporary error tracking (os error 35)
   let tempErrorCount = $state(0);
   let tempErrorSince = $state<number | null>(null);
+  let errorElapsedSeconds = $state(0);
 
   // Storage abstraction
   async function storageGet<T>(key: string): Promise<T | null> {
@@ -161,9 +169,52 @@
       // Charger la langue sauvegardée
       const savedLang = await storageGet<string>('locale');
       if (savedLang) setLocale(savedLang as SupportedLocale);
+      // Charger le refresh rate
+      const savedRefreshRate = await storageGet<number>('refresh_rate');
+      if (savedRefreshRate) configuredRefreshRate = savedRefreshRate;
+      // Charger l'intervalle du scheduler
+      const savedSchedulerInterval = await storageGet<number>('scheduler_interval');
+      if (savedSchedulerInterval) schedulerCheckInterval = savedSchedulerInterval;
+      // Charger le timeout réseau
+      const savedTimeout = await storageGet<number>('timeout');
+      if (savedTimeout) {
+        configuredTimeout = savedTimeout;
+        await invoke('set_timeout', { timeoutMs: savedTimeout });
+      }
+      // Charger la version de l'app
+      if (isTauriEnv) {
+        appVersion = await getVersion();
+      }
     } catch (e) {
       console.error('Error loading saved configs:', e);
     }
+  }
+
+  async function saveRefreshRate(rate: number) {
+    configuredRefreshRate = rate;
+    currentInterval = rate;
+    await storageSet('refresh_rate', rate);
+    // Redémarrer le polling avec le nouvel intervalle
+    if (interval) {
+      clearInterval(interval);
+      interval = setInterval(fetchData, rate);
+    }
+  }
+
+  async function saveSchedulerInterval(rate: number) {
+    schedulerCheckInterval = rate;
+    await storageSet('scheduler_interval', rate);
+    // Redémarrer le scheduler avec le nouvel intervalle
+    if (schedulerInterval) {
+      clearInterval(schedulerInterval);
+      schedulerInterval = setInterval(checkScheduler, rate);
+    }
+  }
+
+  async function saveTimeout(timeout: number) {
+    configuredTimeout = timeout;
+    await storageSet('timeout', timeout);
+    await invoke('set_timeout', { timeoutMs: timeout });
   }
 
   async function saveTimeSlots() {
@@ -466,22 +517,15 @@
       tempErrorSince = null;
     } catch (e) {
       const errStr = String(e);
-      // Erreur temporaire : ne pas afficher l'écran d'erreur, juste tracker
-      if (errStr.includes('os error 35') || errStr.includes('Resource temporarily unavailable')) {
-        tempErrorCount++;
-        if (!tempErrorSince) {
-          tempErrorSince = Date.now();
+      hasError = true;
+      tempErrorCount++;
+      if (!tempErrorSince) {
+        tempErrorSince = Date.now();
+        if (errStr.includes('os error 35') || errStr.includes('Resource temporarily unavailable')) {
           addLog('error', $_('logs.tempNetworkError'));
+        } else {
+          addLog('error', $_('logs.networkError', { values: { error: errStr } }));
         }
-        hasError = true;
-        // Ne pas mettre error, garder les données précédentes
-      } else {
-        error = errStr;
-        hasError = true;
-        // Reset temp error pour une vraie erreur
-        tempErrorCount = 0;
-        tempErrorSince = null;
-        addLog('error', $_('logs.networkError', { values: { error: errStr } }));
       }
     } finally {
       loading = false;
@@ -577,8 +621,9 @@
     // Écouter les changements de visibilité (minimisation)
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // Charger les configs sauvegardées
+    // Charger les configs sauvegardées (langue, version, etc.)
     await loadSavedConfigs();
+    initializing = false;
 
     // Log de démarrage
     addLog('mode_change', $_('logs.startup'));
@@ -614,14 +659,24 @@
     }
 
     // Démarrer le scheduler (vérifie toutes les minutes)
-    schedulerInterval = setInterval(checkScheduler, 60000);
+    schedulerInterval = setInterval(checkScheduler, schedulerCheckInterval);
     // Check immédiat au démarrage
     setTimeout(checkScheduler, 1000);
+
+    // Timer pour mettre à jour le temps écoulé des erreurs
+    errorTimer = setInterval(() => {
+      if (tempErrorSince) {
+        errorElapsedSeconds = Math.round((Date.now() - tempErrorSince) / 1000);
+      } else {
+        errorElapsedSeconds = 0;
+      }
+    }, 1000);
   });
 
   onDestroy(() => {
     if (interval) clearInterval(interval);
     if (schedulerInterval) clearInterval(schedulerInterval);
+    if (errorTimer) clearInterval(errorTimer);
     document.removeEventListener('visibilitychange', handleVisibilityChange);
   });
 
@@ -699,75 +754,126 @@
         title={fetching ? $_('app.requesting') : tempErrorCount > 0 ? $_('app.failures', { values: { count: tempErrorCount } }) : $_('app.waiting')}
       ></span>
       {#if tempErrorCount > 0 && tempErrorSince}
-        <span class="text-orange-400 text-xs">{$_('app.failuresSince', { values: { count: tempErrorCount, seconds: Math.round((Date.now() - tempErrorSince) / 1000) } })}</span>
+        <span class="text-orange-400 text-xs whitespace-nowrap">{tempErrorCount}x/{errorElapsedSeconds}s</span>
       {/if}
     </div>
-    <div class="flex items-center gap-2">
-      {#if deviceConfigured && !showDeviceSelector && data}
-        <!-- Onglets -->
-        <div class="flex bg-slate-800 rounded-lg p-0.5">
-          <button
-            onclick={() => activeTab = 'dashboard'}
-            class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'dashboard' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
-          >
-            {$_('tabs.dashboard')}
-          </button>
-          <button
-            onclick={() => activeTab = 'infos'}
-            class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'infos' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
-          >
-            {$_('tabs.infos')}
-          </button>
-          <button
-            onclick={() => activeTab = 'logs'}
-            class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'logs' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
-          >
-            {$_('tabs.logs')}
-          </button>
-        </div>
-        <!-- Bouton paramètres -->
+    {#if deviceConfigured && data}
+      <div class="flex bg-slate-800 rounded-lg p-0.5">
         <button
-          onclick={openDeviceSelector}
-          class="p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
-          title={$_('discovery.changeBattery')}
+          onclick={() => { activeTab = 'dashboard'; showDeviceSelector = false; }}
+          class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'dashboard' && !showDeviceSelector ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          {$_('tabs.dashboard')}
+        </button>
+        <button
+          onclick={() => { activeTab = 'infos'; showDeviceSelector = false; }}
+          class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'infos' && !showDeviceSelector ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
+        >
+          {$_('tabs.infos')}
+        </button>
+        <button
+          onclick={() => { activeTab = 'logs'; showDeviceSelector = false; }}
+          class="px-3 py-1 text-sm rounded-md transition-colors {activeTab === 'logs' && !showDeviceSelector ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
+        >
+          {$_('tabs.logs')}
+        </button>
+        <button
+          onclick={() => showDeviceSelector = !showDeviceSelector}
+          class="px-2 py-1 text-sm rounded-md transition-colors {showDeviceSelector ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}"
+          title={$_('config.title')}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
           </svg>
         </button>
-      {/if}
-    </div>
+      </div>
+    {/if}
   </header>
 
-  {#if discovering}
+  {#if initializing}
+    <div class="flex items-center justify-center h-64">
+      <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-500"></div>
+    </div>
+
+  {:else if discovering}
     <div class="flex flex-col items-center justify-center h-64 gap-4">
       <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-500"></div>
       <p class="text-slate-400">{$_('discovery.searching')}</p>
     </div>
 
   {:else if showDeviceSelector}
-    <div class="w-full max-w-2xl mx-auto">
-      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 mb-6">
-        <h3 class="text-xl font-bold text-white mb-4 flex items-center gap-2">
-          <span class="text-2xl">🔋</span>
+    <div class="w-full max-w-2xl mx-auto space-y-4">
+      <!-- Refresh Rate -->
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-4">
+        <h3 class="text-base font-bold text-white mb-3 flex items-center gap-2">
+          <span class="text-lg">⚙️</span>
+          {$_('config.title')}
+        </h3>
+        <div class="flex items-center justify-between">
+          <span class="text-slate-300 text-sm">{$_('config.refreshRate')}</span>
+          <select
+            value={configuredRefreshRate}
+            onchange={(e) => saveRefreshRate(Number(e.currentTarget.value))}
+            class="bg-slate-700 text-white text-sm rounded-lg px-3 py-1.5 border border-slate-600 focus:border-cyan-500 focus:outline-none"
+          >
+            <option value={3000}>3s</option>
+            <option value={5000}>5s</option>
+            <option value={10000}>10s</option>
+            <option value={30000}>30s</option>
+          </select>
+        </div>
+        <div class="flex items-center justify-between mt-2">
+          <span class="text-slate-300 text-sm">{$_('config.schedulerInterval')}</span>
+          <select
+            value={schedulerCheckInterval}
+            onchange={(e) => saveSchedulerInterval(Number(e.currentTarget.value))}
+            class="bg-slate-700 text-white text-sm rounded-lg px-3 py-1.5 border border-slate-600 focus:border-cyan-500 focus:outline-none"
+          >
+            <option value={30000}>30s</option>
+            <option value={60000}>1min</option>
+            <option value={120000}>2min</option>
+            <option value={300000}>5min</option>
+            <option value={600000}>10min</option>
+            <option value={900000}>15min</option>
+          </select>
+        </div>
+        <div class="flex items-center justify-between mt-2">
+          <span class="text-slate-300 text-sm">{$_('config.timeout')}</span>
+          <select
+            value={configuredTimeout}
+            onchange={(e) => saveTimeout(Number(e.currentTarget.value))}
+            class="bg-slate-700 text-white text-sm rounded-lg px-3 py-1.5 border border-slate-600 focus:border-cyan-500 focus:outline-none"
+          >
+            <option value={1000}>1s</option>
+            <option value={2000}>2s</option>
+            <option value={3000}>3s</option>
+            <option value={5000}>5s</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Battery Selection -->
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-4">
+        <h3 class="text-base font-bold text-white mb-3 flex items-center gap-2">
+          <span class="text-lg">🔋</span>
           {allDevices.length > 0 ? $_('discovery.selectBattery') : $_('discovery.manualConnection')}
         </h3>
 
         {#if allDevices.length > 0}
-          <div class="space-y-3 mb-6">
+          <div class="space-y-2 mb-4 max-h-36 overflow-y-auto">
             {#each allDevices as device}
               <button
                 onclick={() => selectDevice(device)}
                 disabled={connecting}
-                class="w-full flex items-center justify-between p-4 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:cursor-not-allowed rounded-lg transition-colors text-left"
+                class="w-full flex items-center justify-between p-3 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:cursor-not-allowed rounded-lg transition-colors text-left"
               >
                 <div>
-                  <div class="text-white font-medium">{device.device ?? 'Marstek'}</div>
-                  <div class="text-slate-400 text-sm">{device.ip}:{device.port}</div>
+                  <div class="text-white text-sm font-medium">{device.device ?? 'Marstek'}</div>
+                  <div class="text-slate-400 text-xs">{device.ip}:{device.port}</div>
                 </div>
                 {#if device.ver}
-                  <div class="text-slate-500 text-sm">v{device.ver}</div>
+                  <div class="text-slate-500 text-xs">v{device.ver}</div>
                 {/if}
               </button>
             {/each}
@@ -815,38 +921,9 @@
       </div>
     </div>
 
-  {:else if loading}
+  {:else if loading && !data}
     <div class="flex items-center justify-center h-64">
       <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-500"></div>
-    </div>
-
-  {:else if error}
-    <div class="bg-red-900/50 border border-red-500 rounded-xl p-6 text-red-200 max-w-2xl mx-auto">
-      <h3 class="font-bold text-lg mb-2">{$_('error.connectionError')}</h3>
-      <p class="mb-4">{error}</p>
-      <div class="flex gap-3">
-        <button
-          onclick={() => {
-            error = null;
-            loading = true;
-            fetchData();
-          }}
-          class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-medium rounded-lg transition-colors"
-        >
-          {$_('error.retry')}
-        </button>
-        <button
-          onclick={() => {
-            error = null;
-            deviceConfigured = false;
-            discoveryError = 'no_device';
-            if (interval) clearInterval(interval);
-          }}
-          class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors"
-        >
-          {$_('error.changeIp')}
-        </button>
-      </div>
     </div>
 
   {:else if data}
@@ -1304,10 +1381,13 @@
     </div>
   {/if}
 
-  <footer class="mt-auto pt-2 flex items-center justify-center gap-4">
+  <footer class="mt-auto pt-2 flex items-center justify-center gap-4" class:invisible={initializing}>
     <a href="http://to.jsys.fr/Rg1F9B" target="_blank" class="text-slate-500 hover:text-slate-400 text-xs transition-colors">
-      https://github.com/jsys/marstip
+      github.com/jsys/marstip
     </a>
+    {#if appVersion}
+      <span class="text-slate-600 text-xs">v{appVersion}</span>
+    {/if}
     <div class="flex gap-2">
       <button
         onclick={() => switchLocale('fr')}

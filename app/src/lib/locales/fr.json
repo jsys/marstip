@@ -106,5 +106,11 @@
   },
   "slider": {
     "adjustBoundary": "Ajuster la frontière"
+  },
+  "config": {
+    "title": "Configuration",
+    "refreshRate": "Intervalle de rafraîchissement (stoppé si appli réduite)",
+    "schedulerInterval": "Intervalle de vérification du mode",
+    "timeout": "Timeout réseau"
   }
 }
