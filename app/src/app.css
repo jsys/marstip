@@ -11,3 +11,10 @@ body {
   padding: 0;
   min-height: 100vh;
 }
+
+/* Prevent Windows High Contrast Mode from overriding colors */
+@media (forced-colors: active) {
+  * {
+    forced-color-adjust: none;
+  }
+}

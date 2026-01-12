@@ -1308,17 +1308,31 @@
     <a href="http://to.jsys.fr/Rg1F9B" target="_blank" class="text-slate-500 hover:text-slate-400 text-xs transition-colors">
       https://github.com/jsys/marstip
     </a>
-    <div class="flex gap-1">
+    <div class="flex gap-2">
       <button
         onclick={() => switchLocale('fr')}
-        class="text-base transition-opacity {$locale === 'fr' ? 'opacity-100' : 'opacity-40 hover:opacity-70'}"
+        class="transition-opacity {$locale === 'fr' ? 'opacity-100' : 'opacity-40 hover:opacity-70'}"
         title="Français"
-      >🇫🇷</button>
+      >
+        <svg width="20" height="14" viewBox="0 0 30 20" class="rounded-sm">
+          <rect width="10" height="20" fill="#002654"/>
+          <rect x="10" width="10" height="20" fill="#fff"/>
+          <rect x="20" width="10" height="20" fill="#ce1126"/>
+        </svg>
+      </button>
       <button
         onclick={() => switchLocale('en')}
-        class="text-base transition-opacity {$locale === 'en' ? 'opacity-100' : 'opacity-40 hover:opacity-70'}"
+        class="transition-opacity {$locale === 'en' ? 'opacity-100' : 'opacity-40 hover:opacity-70'}"
         title="English"
-      >🇬🇧</button>
+      >
+        <svg width="20" height="14" viewBox="0 0 60 40" class="rounded-sm">
+          <rect width="60" height="40" fill="#012169"/>
+          <path d="M0,0 L60,40 M60,0 L0,40" stroke="#fff" stroke-width="8"/>
+          <path d="M0,0 L60,40 M60,0 L0,40" stroke="#C8102E" stroke-width="4"/>
+          <path d="M30,0 V40 M0,20 H60" stroke="#fff" stroke-width="12"/>
+          <path d="M30,0 V40 M0,20 H60" stroke="#C8102E" stroke-width="6"/>
+        </svg>
+      </button>
     </div>
   </footer>
 </main>
